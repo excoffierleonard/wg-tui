@@ -1,13 +1,7 @@
 //! WireGuard TUI Manager
 //! A terminal user interface for managing WireGuard tunnels locally.
 
-use std::{
-    fs,
-    io::stdout,
-    path::PathBuf,
-    process::Command,
-    time::Duration,
-};
+use std::{fs, io::stdout, path::PathBuf, process::Command, time::Duration};
 
 use color_eyre::Result;
 use crossterm::{
@@ -179,15 +173,16 @@ fn discover_tunnels() -> Vec<Tunnel> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "conf")
-                && let Some(stem) = path.file_stem() {
-                    let name = stem.to_string_lossy().to_string();
-                    tunnels.push(Tunnel {
-                        name,
-                        config_path: path,
-                        is_active: false,
-                        interface: None,
-                    });
-                }
+                && let Some(stem) = path.file_stem()
+            {
+                let name = stem.to_string_lossy().to_string();
+                tunnels.push(Tunnel {
+                    name,
+                    config_path: path,
+                    is_active: false,
+                    interface: None,
+                });
+            }
         }
     }
 
@@ -259,17 +254,18 @@ fn parse_wg_show_output(output: &str) -> Option<InterfaceInfo> {
                     Some(line.strip_prefix("latest handshake:")?.trim().to_string());
             }
         } else if line.starts_with("transfer:")
-            && let Some(ref mut peer) = current_peer {
-                let transfer = line.strip_prefix("transfer:")?.trim();
-                // Parse "X received, Y sent"
-                let parts: Vec<&str> = transfer.split(", ").collect();
-                if let Some(rx) = parts.first() {
-                    peer.transfer_rx = parse_transfer_bytes(rx);
-                }
-                if let Some(tx) = parts.get(1) {
-                    peer.transfer_tx = parse_transfer_bytes(tx);
-                }
+            && let Some(ref mut peer) = current_peer
+        {
+            let transfer = line.strip_prefix("transfer:")?.trim();
+            // Parse "X received, Y sent"
+            let parts: Vec<&str> = transfer.split(", ").collect();
+            if let Some(rx) = parts.first() {
+                peer.transfer_rx = parse_transfer_bytes(rx);
             }
+            if let Some(tx) = parts.get(1) {
+                peer.transfer_tx = parse_transfer_bytes(tx);
+            }
+        }
     }
 
     // Don't forget the last peer
@@ -367,43 +363,44 @@ fn restore_terminal() -> Result<()> {
 
 fn handle_events(app: &mut App) -> Result<()> {
     if event::poll(Duration::from_millis(100))?
-        && let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                return Ok(());
-            }
-
-            // Clear message on any key press
-            app.message = None;
-
-            // Handle help overlay first
-            if app.show_help {
-                app.show_help = false;
-                return Ok(());
-            }
-
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.should_quit = true;
-                }
-                KeyCode::Char('j') | KeyCode::Down => app.select_next(),
-                KeyCode::Char('k') | KeyCode::Up => app.select_previous(),
-                KeyCode::Char('g') => app.list_state.select(Some(0)),
-                KeyCode::Char('G') => {
-                    if !app.tunnels.is_empty() {
-                        app.list_state.select(Some(app.tunnels.len() - 1));
-                    }
-                }
-                KeyCode::Enter | KeyCode::Char(' ') => app.toggle_selected(),
-                KeyCode::Char('d') => app.show_details = !app.show_details,
-                KeyCode::Char('r') => {
-                    app.refresh_tunnels();
-                    app.set_message("Tunnels refreshed", MessageKind::Info);
-                }
-                KeyCode::Char('?') => app.show_help = true,
-                _ => {}
-            }
+        && let Event::Key(key) = event::read()?
+    {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
         }
+
+        // Clear message on any key press
+        app.message = None;
+
+        // Handle help overlay first
+        if app.show_help {
+            app.show_help = false;
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.should_quit = true;
+            }
+            KeyCode::Char('j') | KeyCode::Down => app.select_next(),
+            KeyCode::Char('k') | KeyCode::Up => app.select_previous(),
+            KeyCode::Char('g') => app.list_state.select(Some(0)),
+            KeyCode::Char('G') => {
+                if !app.tunnels.is_empty() {
+                    app.list_state.select(Some(app.tunnels.len() - 1));
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => app.toggle_selected(),
+            KeyCode::Char('d') => app.show_details = !app.show_details,
+            KeyCode::Char('r') => {
+                app.refresh_tunnels();
+                app.set_message("Tunnels refreshed", MessageKind::Info);
+            }
+            KeyCode::Char('?') => app.show_help = true,
+            _ => {}
+        }
+    }
     Ok(())
 }
 
