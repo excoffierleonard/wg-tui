@@ -747,6 +747,16 @@ fn truncate_key(key: &str) -> String {
 fn main() -> Result<()> {
     color_eyre::install()?;
 
+    // Check if running as root, re-exec with sudo if not
+    if !nix::unistd::geteuid().is_root() {
+        let args: Vec<String> = std::env::args().collect();
+        let status = Command::new("sudo")
+            .args(&args)
+            .status()
+            .expect("Failed to execute sudo");
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
     let mut terminal = setup_terminal()?;
     let mut app = App::new();
 
