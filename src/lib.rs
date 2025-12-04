@@ -1,5 +1,3 @@
-//! WireGuard TUI Manager - Core library
-
 use std::{fs, path::PathBuf, process::Command, time::Duration};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -7,22 +5,14 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span, Text},
+    text::{Line, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
-
-// ============================================================================
-// Constants
-// ============================================================================
 
 const CONFIG_DIR: &str = "/etc/wireguard";
 const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
 const GIB: u64 = MIB * 1024;
-
-// ============================================================================
-// Types
-// ============================================================================
 
 #[derive(Debug, Clone, Default)]
 pub struct Tunnel {
@@ -57,12 +47,12 @@ pub enum Message {
 }
 
 impl Message {
-    fn color(&self) -> Color {
-        match self {
+    fn style(&self) -> Style {
+        Style::default().fg(match self {
             Self::Info(_) => Color::Blue,
             Self::Success(_) => Color::Green,
             Self::Error(_) => Color::Red,
-        }
+        })
     }
 
     fn text(&self) -> &str {
@@ -71,10 +61,6 @@ impl Message {
         }
     }
 }
-
-// ============================================================================
-// Application
-// ============================================================================
 
 pub struct App {
     tunnels: Vec<Tunnel>,
@@ -110,74 +96,50 @@ impl App {
 
     pub fn refresh_tunnels(&mut self) {
         self.tunnels = discover_tunnels();
-        for tunnel in &mut self.tunnels {
-            tunnel.is_active = is_interface_active(&tunnel.name);
-            if tunnel.is_active {
-                tunnel.interface = get_interface_info(&tunnel.name);
+        for t in &mut self.tunnels {
+            t.is_active = is_interface_active(&t.name);
+            if t.is_active {
+                t.interface = get_interface_info(&t.name);
             }
         }
         self.clamp_selection();
     }
 
     fn clamp_selection(&mut self) {
-        match (self.list_state.selected(), self.tunnels.is_empty()) {
-            (_, true) => self.list_state.select(None),
-            (None, false) => self.list_state.select(Some(0)),
-            (Some(i), false) if i >= self.tunnels.len() => {
-                self.list_state.select(Some(self.tunnels.len() - 1));
-            }
-            _ => {}
-        }
+        let selected = match (self.list_state.selected(), self.tunnels.len()) {
+            (_, 0) => None,
+            (None | Some(0), _) => Some(0),
+            (Some(i), len) => Some(i.min(len - 1)),
+        };
+        self.list_state.select(selected);
     }
 
-    fn selected_tunnel(&self) -> Option<&Tunnel> {
+    fn selected(&self) -> Option<&Tunnel> {
         self.list_state.selected().and_then(|i| self.tunnels.get(i))
     }
 
-    fn select_next(&mut self) {
+    fn move_selection(&mut self, delta: isize) {
         if let Some(i) = self.list_state.selected() {
-            self.list_state
-                .select(Some((i + 1).min(self.tunnels.len().saturating_sub(1))));
-        }
-    }
-
-    fn select_previous(&mut self) {
-        if let Some(i) = self.list_state.selected() {
-            self.list_state.select(Some(i.saturating_sub(1)));
-        }
-    }
-
-    fn select_first(&mut self) {
-        if !self.tunnels.is_empty() {
-            self.list_state.select(Some(0));
-        }
-    }
-
-    fn select_last(&mut self) {
-        if !self.tunnels.is_empty() {
-            self.list_state.select(Some(self.tunnels.len() - 1));
+            let new = (i as isize + delta).clamp(0, self.tunnels.len().saturating_sub(1) as isize);
+            self.list_state.select(Some(new as usize));
         }
     }
 
     fn toggle_selected(&mut self) {
-        let Some(tunnel) = self.list_state.selected().and_then(|i| self.tunnels.get(i)) else {
+        let Some(tunnel) = self.selected() else {
             return;
         };
+        let (name, active) = (tunnel.name.clone(), tunnel.is_active);
 
-        let (name, is_active) = (tunnel.name.clone(), tunnel.is_active);
-        let result = if is_active {
-            interface_down(&name)
-        } else {
-            interface_up(&name)
-        };
-
-        match result {
+        match wg_quick(if active { "down" } else { "up" }, &name) {
             Ok(()) => {
-                let action = if is_active { "stopped" } else { "started" };
-                self.message = Some(Message::Success(format!("Tunnel '{name}' {action}")));
+                self.message = Some(Message::Success(format!(
+                    "Tunnel '{name}' {}",
+                    if active { "stopped" } else { "started" }
+                )));
                 self.refresh_tunnels();
             }
-            Err(e) => self.message = Some(Message::Error(format!("Error: {e}"))),
+            Err(e) => self.message = Some(Message::Error(e)),
         }
     }
 
@@ -203,15 +165,17 @@ impl App {
         match (key.code, key.modifiers) {
             (KeyCode::Char('q') | KeyCode::Esc, _) => self.should_quit = true,
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => self.should_quit = true,
-            (KeyCode::Char('j') | KeyCode::Down, _) => self.select_next(),
-            (KeyCode::Char('k') | KeyCode::Up, _) => self.select_previous(),
-            (KeyCode::Char('g'), _) => self.select_first(),
-            (KeyCode::Char('G'), _) => self.select_last(),
+            (KeyCode::Char('j') | KeyCode::Down, _) => self.move_selection(1),
+            (KeyCode::Char('k') | KeyCode::Up, _) => self.move_selection(-1),
+            (KeyCode::Char('g'), _) => self.list_state.select(Some(0)),
+            (KeyCode::Char('G'), _) => self
+                .list_state
+                .select(Some(self.tunnels.len().saturating_sub(1))),
             (KeyCode::Enter | KeyCode::Char(' '), _) => self.toggle_selected(),
             (KeyCode::Char('d'), _) => self.show_details = !self.show_details,
             (KeyCode::Char('r'), _) => {
                 self.refresh_tunnels();
-                self.message = Some(Message::Info("Tunnels refreshed".into()));
+                self.message = Some(Message::Info("Refreshed".into()));
             }
             (KeyCode::Char('?'), _) => self.show_help = true,
             _ => {}
@@ -220,47 +184,41 @@ impl App {
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
-        let chunks = if self.show_details {
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+        let chunks = Layout::horizontal(if self.show_details {
+            vec![Constraint::Percentage(40), Constraint::Percentage(60)]
         } else {
-            Layout::horizontal([Constraint::Percentage(100)])
-        }
+            vec![Constraint::Percentage(100)]
+        })
         .split(frame.area());
 
-        let list_chunks = Layout::vertical([
+        let main = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(0),
             Constraint::Length(3),
         ])
         .split(chunks[0]);
 
-        self.render_header(frame, list_chunks[0]);
-        self.render_tunnel_list(frame, list_chunks[1]);
-        self.render_status_bar(frame, list_chunks[2]);
+        self.render_header(frame, main[0]);
+        self.render_list(frame, main[1]);
+        self.render_status(frame, main[2]);
 
         if self.show_details && chunks.len() > 1 {
             self.render_details(frame, chunks[1]);
         }
-
         if self.show_help {
-            render_help_overlay(frame, frame.area());
+            render_help(frame);
         }
     }
 
-    fn render_header(&self, frame: &mut Frame, area: Rect) {
-        let title = Paragraph::new(Line::from(vec![
-            Span::styled(" WireGuard ", Style::default().fg(Color::Cyan).bold()),
-            Span::styled("TUI Manager", Style::default().fg(Color::White)),
-        ]))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        );
-        frame.render_widget(title, area);
+    fn render_header(&self, f: &mut Frame, area: Rect) {
+        let title = Line::from(vec![
+            " WireGuard ".fg(Color::Cyan).bold(),
+            "TUI Manager".fg(Color::White),
+        ]);
+        f.render_widget(Paragraph::new(title).block(bordered_block(None)), area);
     }
 
-    fn render_tunnel_list(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_list(&mut self, f: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self
             .tunnels
             .iter()
@@ -271,19 +229,14 @@ impl App {
                     ("○", Color::DarkGray)
                 };
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {icon} "), Style::default().fg(color)),
-                    Span::styled(&t.name, Style::default().fg(Color::White)),
+                    format!(" {icon} ").fg(color),
+                    t.name.clone().fg(Color::White),
                 ]))
             })
             .collect();
 
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(" Tunnels ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            )
+            .block(bordered_block(Some(" Tunnels ")))
             .highlight_style(
                 Style::default()
                     .bg(Color::DarkGray)
@@ -291,118 +244,92 @@ impl App {
             )
             .highlight_symbol("▶ ");
 
-        frame.render_stateful_widget(list, area, &mut self.list_state);
+        f.render_stateful_widget(list, area, &mut self.list_state);
     }
 
-    fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
+    fn render_status(&self, f: &mut Frame, area: Rect) {
         let content = match &self.message {
-            Some(msg) => Line::from(Span::styled(
-                format!(" {}", msg.text()),
-                Style::default().fg(msg.color()),
-            )),
+            Some(msg) => Line::styled(format!(" {}", msg.text()), msg.style()),
             None => Line::from(vec![
-                Span::styled(" j/k", Style::default().fg(Color::Yellow)),
-                Span::raw(" navigate  "),
-                Span::styled("Enter", Style::default().fg(Color::Yellow)),
-                Span::raw(" toggle  "),
-                Span::styled("d", Style::default().fg(Color::Yellow)),
-                Span::raw(" details  "),
-                Span::styled("?", Style::default().fg(Color::Yellow)),
-                Span::raw(" help  "),
-                Span::styled("q", Style::default().fg(Color::Yellow)),
-                Span::raw(" quit"),
+                " j/k".fg(Color::Yellow),
+                " nav  ".into(),
+                "Enter".fg(Color::Yellow),
+                " toggle  ".into(),
+                "d".fg(Color::Yellow),
+                " details  ".into(),
+                "?".fg(Color::Yellow),
+                " help  ".into(),
+                "q".fg(Color::Yellow),
+                " quit".into(),
             ]),
         };
-        frame.render_widget(
-            Paragraph::new(content).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            ),
-            area,
-        );
+        f.render_widget(Paragraph::new(content).block(bordered_block(None)), area);
     }
 
-    fn render_details(&self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .title(" Details ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
-
-        let Some(tunnel) = self.selected_tunnel() else {
-            frame.render_widget(
+    fn render_details(&self, f: &mut Frame, area: Rect) {
+        let Some(tunnel) = self.selected() else {
+            f.render_widget(
                 Paragraph::new(" No tunnel selected")
-                    .style(Style::default().fg(Color::DarkGray))
-                    .block(block),
+                    .fg(Color::DarkGray)
+                    .block(bordered_block(Some(" Details "))),
                 area,
             );
             return;
         };
 
         let mut lines = vec![
-            labeled_line("Name: ", &tunnel.name),
-            labeled_line("Config: ", &tunnel.config_path.display().to_string()),
+            label("Name: ", &tunnel.name),
+            label("Config: ", &tunnel.config_path.display().to_string()),
             Line::from(vec![
-                Span::styled("Status: ", Style::default().fg(Color::Yellow)),
+                "Status: ".fg(Color::Yellow),
                 if tunnel.is_active {
-                    Span::styled("Active", Style::default().fg(Color::Green))
+                    "Active".fg(Color::Green)
                 } else {
-                    Span::styled("Inactive", Style::default().fg(Color::Red))
+                    "Inactive".fg(Color::Red)
                 },
             ]),
             Line::raw(""),
         ];
 
         if let Some(iface) = &tunnel.interface {
-            lines.push(section_header("Interface"));
+            lines.push(section("Interface"));
             if !iface.public_key.is_empty() {
-                lines.push(labeled_line(
-                    "Public Key: ",
-                    &truncate_key(&iface.public_key),
-                ));
+                lines.push(label("Public Key: ", &truncate_key(&iface.public_key)));
             }
             if let Some(port) = iface.listen_port {
-                lines.push(labeled_line("Listen Port: ", &port.to_string()));
+                lines.push(label("Listen Port: ", &port.to_string()));
             }
 
-            if !iface.peers.is_empty() {
+            for (i, peer) in iface.peers.iter().enumerate() {
                 lines.push(Line::raw(""));
-                lines.push(section_header(&format!("Peers ({})", iface.peers.len())));
-                for (i, peer) in iface.peers.iter().enumerate() {
-                    if i > 0 {
-                        lines.push(Line::raw(""));
-                    }
-                    lines.extend(peer_lines(peer));
+                if i == 0 {
+                    lines.push(section(&format!("Peers ({})", iface.peers.len())));
                 }
+                lines.extend(peer_lines(peer));
             }
         }
 
-        frame.render_widget(
+        f.render_widget(
             Paragraph::new(Text::from(lines))
-                .block(block)
+                .block(bordered_block(Some(" Details ")))
                 .wrap(Wrap { trim: false }),
             area,
         );
     }
 }
 
-// ============================================================================
-// WireGuard Interaction
-// ============================================================================
-
 fn discover_tunnels() -> Vec<Tunnel> {
     let Ok(entries) = fs::read_dir(CONFIG_DIR) else {
-        return Vec::new();
+        return vec![];
     };
 
-    let mut tunnels: Vec<Tunnel> = entries
+    let mut tunnels: Vec<_> = entries
         .flatten()
         .filter_map(|e| {
             let path = e.path();
-            let is_conf = path.extension().is_some_and(|ext| ext == "conf");
-            let name = path.file_stem()?.to_string_lossy().into();
-            is_conf.then_some(Tunnel {
-                name,
+            (path.extension()? == "conf").then_some(())?;
+            Some(Tunnel {
+                name: path.file_stem()?.to_string_lossy().into(),
                 config_path: path,
                 ..Default::default()
             })
@@ -421,56 +348,51 @@ fn is_interface_active(name: &str) -> bool {
 }
 
 fn get_interface_info(name: &str) -> Option<InterfaceInfo> {
-    let output = Command::new("wg").args(["show", name]).output().ok()?;
-    output
-        .status
+    let out = Command::new("wg").args(["show", name]).output().ok()?;
+    out.status
         .success()
-        .then(|| parse_wg_output(&String::from_utf8_lossy(&output.stdout)))
+        .then(|| parse_wg_output(&String::from_utf8_lossy(&out.stdout)))
 }
 
 fn parse_wg_output(output: &str) -> InterfaceInfo {
     let mut info = InterfaceInfo::default();
-    let mut current_peer: Option<PeerInfo> = None;
+    let mut peer: Option<PeerInfo> = None;
 
     for line in output.lines().map(str::trim) {
-        match line.split_once(':') {
-            Some(("public key", v)) if current_peer.is_none() => info.public_key = v.trim().into(),
-            Some(("listening port", v)) => info.listen_port = v.trim().parse().ok(),
-            Some(("peer", v)) => {
-                if let Some(peer) = current_peer.take() {
-                    info.peers.push(peer);
+        let Some((key, val)) = line.split_once(':') else {
+            continue;
+        };
+        let val = val.trim();
+
+        match (key, peer.as_mut()) {
+            ("public key", None) => info.public_key = val.into(),
+            ("listening port", _) => info.listen_port = val.parse().ok(),
+            ("peer", _) => {
+                if let Some(p) = peer.take() {
+                    info.peers.push(p);
                 }
-                current_peer = Some(PeerInfo {
-                    public_key: v.trim().into(),
+                peer = Some(PeerInfo {
+                    public_key: val.into(),
                     ..Default::default()
                 });
             }
-            Some(("endpoint", v)) if current_peer.is_some() => {
-                current_peer.as_mut().unwrap().endpoint = Some(v.trim().into());
-            }
-            Some(("allowed ips", v)) if current_peer.is_some() => {
-                current_peer.as_mut().unwrap().allowed_ips =
-                    v.trim().split(", ").map(Into::into).collect();
-            }
-            Some(("latest handshake", v)) if current_peer.is_some() => {
-                current_peer.as_mut().unwrap().latest_handshake = Some(v.trim().into());
-            }
-            Some(("transfer", v)) if current_peer.is_some() => {
-                let peer = current_peer.as_mut().unwrap();
-                let parts: Vec<&str> = v.trim().split(", ").collect();
+            ("endpoint", Some(p)) => p.endpoint = Some(val.into()),
+            ("allowed ips", Some(p)) => p.allowed_ips = val.split(", ").map(Into::into).collect(),
+            ("latest handshake", Some(p)) => p.latest_handshake = Some(val.into()),
+            ("transfer", Some(p)) => {
+                let parts: Vec<_> = val.split(", ").collect();
                 if let Some(rx) = parts.first() {
-                    peer.transfer_rx = parse_bytes(rx);
+                    p.transfer_rx = parse_bytes(rx);
                 }
                 if let Some(tx) = parts.get(1) {
-                    peer.transfer_tx = parse_bytes(tx);
+                    p.transfer_tx = parse_bytes(tx);
                 }
             }
             _ => {}
         }
     }
-
-    if let Some(peer) = current_peer {
-        info.peers.push(peer);
+    if let Some(p) = peer {
+        info.peers.push(p);
     }
     info
 }
@@ -478,129 +400,105 @@ fn parse_wg_output(output: &str) -> InterfaceInfo {
 fn parse_bytes(s: &str) -> u64 {
     let s = s.replace(" received", "").replace(" sent", "");
     let mut parts = s.split_whitespace();
-    let value: f64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let val: f64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
 
     match parts.next().map(|u| u.to_uppercase()).as_deref() {
-        Some("B") => value as u64,
-        Some("KIB") => (value * KIB as f64) as u64,
-        Some("MIB") => (value * MIB as f64) as u64,
-        Some("GIB") => (value * GIB as f64) as u64,
-        Some("TIB") => (value * GIB as f64 * 1024.0) as u64,
+        Some("B") => val as u64,
+        Some("KIB") => (val * KIB as f64) as u64,
+        Some("MIB") => (val * MIB as f64) as u64,
+        Some("GIB") => (val * GIB as f64) as u64,
+        Some("TIB") => (val * GIB as f64 * 1024.0) as u64,
         _ => 0,
     }
 }
 
-fn interface_up(name: &str) -> Result<(), String> {
-    run_wg_quick("up", name)
-}
-
-fn interface_down(name: &str) -> Result<(), String> {
-    run_wg_quick("down", name)
-}
-
-fn run_wg_quick(action: &str, name: &str) -> Result<(), String> {
-    let output = Command::new("wg-quick")
+fn wg_quick(action: &str, name: &str) -> Result<(), String> {
+    let out = Command::new("wg-quick")
         .args([action, name])
         .output()
         .map_err(|e| e.to_string())?;
-    output
-        .status
+    out.status
         .success()
         .then_some(())
-        .ok_or_else(|| String::from_utf8_lossy(&output.stderr).trim().into())
+        .ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().into())
 }
 
-// ============================================================================
-// UI Helpers
-// ============================================================================
+fn bordered_block(title: Option<&str>) -> Block<'_> {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    match title {
+        Some(t) => block.title(t),
+        None => block,
+    }
+}
 
-fn labeled_line(label: &str, value: &str) -> Line<'static> {
+fn label(key: &str, val: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(label.to_string(), Style::default().fg(Color::Yellow)),
-        Span::raw(value.to_string()),
+        key.to_string().fg(Color::Yellow),
+        val.to_string().into(),
     ])
 }
 
-fn section_header(title: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("── {title} ──"),
-        Style::default().fg(Color::Cyan),
-    ))
+fn section(title: &str) -> Line<'static> {
+    Line::from(format!("── {title} ──").fg(Color::Cyan))
 }
 
 fn peer_lines(peer: &PeerInfo) -> Vec<Line<'static>> {
-    let mut lines = vec![labeled_line("  Key: ", &truncate_key(&peer.public_key))];
+    let mut lines = vec![label("  Key: ", &truncate_key(&peer.public_key))];
 
     if let Some(ep) = &peer.endpoint {
-        lines.push(labeled_line("  Endpoint: ", ep));
+        lines.push(label("  Endpoint: ", ep));
     }
     if !peer.allowed_ips.is_empty() {
-        lines.push(labeled_line(
-            "  Allowed IPs: ",
-            &peer.allowed_ips.join(", "),
-        ));
+        lines.push(label("  Allowed IPs: ", &peer.allowed_ips.join(", ")));
     }
     if let Some(hs) = &peer.latest_handshake {
-        lines.push(labeled_line("  Last Handshake: ", hs));
+        lines.push(label("  Last Handshake: ", hs));
     }
     if peer.transfer_rx > 0 || peer.transfer_tx > 0 {
         lines.push(Line::from(vec![
-            Span::styled(
-                "  Transfer: ".to_string(),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled("↓ ", Style::default().fg(Color::Green)),
-            Span::raw(format_bytes(peer.transfer_rx)),
-            Span::raw("  "),
-            Span::styled("↑ ", Style::default().fg(Color::Magenta)),
-            Span::raw(format_bytes(peer.transfer_tx)),
+            "  Transfer: ".to_string().fg(Color::Yellow),
+            "↓ ".fg(Color::Green),
+            format_bytes(peer.transfer_rx).into(),
+            "  ".into(),
+            "↑ ".fg(Color::Magenta),
+            format_bytes(peer.transfer_tx).into(),
         ]));
     }
     lines
 }
 
-fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(50, 60, area);
-    frame.render_widget(Clear, popup);
+fn render_help(f: &mut Frame) {
+    let area = centered_rect(50, 60, f.area());
+    f.render_widget(Clear, area);
 
-    let help_text: Vec<Line> = [
-        ("", "Keyboard Shortcuts", true),
-        ("", "", false),
-        ("  j / ↓    ", "Move down", false),
-        ("  k / ↑    ", "Move up", false),
-        ("  g        ", "Go to first", false),
-        ("  G        ", "Go to last", false),
-        ("", "", false),
-        ("  Enter    ", "Toggle tunnel", false),
-        ("  Space    ", "Toggle tunnel", false),
-        ("", "", false),
-        ("  d        ", "Toggle details", false),
-        ("  r        ", "Refresh list", false),
-        ("", "", false),
-        ("  ?        ", "Show this help", false),
-        ("  q / Esc  ", "Quit", false),
-    ]
-    .into_iter()
-    .map(|(key, desc, is_title)| {
-        if is_title {
-            Line::from(Span::styled(desc, Style::default().fg(Color::Cyan).bold()))
-        } else if key.is_empty() {
-            Line::raw("")
-        } else {
-            Line::from(vec![
-                Span::styled(key, Style::default().fg(Color::Yellow)),
-                Span::raw(desc),
-            ])
-        }
-    })
-    .chain(std::iter::once(Line::from(Span::styled(
-        "Press any key to close",
-        Style::default().fg(Color::DarkGray).italic(),
-    ))))
-    .collect();
+    let keys = [
+        ("j / ↓", "Move down"),
+        ("k / ↑", "Move up"),
+        ("g / G", "First / Last"),
+        ("Enter", "Toggle tunnel"),
+        ("d", "Toggle details"),
+        ("r", "Refresh"),
+        ("?", "Help"),
+        ("q", "Quit"),
+    ];
 
-    frame.render_widget(
-        Paragraph::new(Text::from(help_text))
+    let mut lines: Vec<Line> = vec![
+        Line::from("Keyboard Shortcuts".fg(Color::Cyan).bold()),
+        Line::raw(""),
+    ];
+    lines.extend(
+        keys.iter()
+            .map(|(k, d)| Line::from(vec![format!("  {k:<10}").fg(Color::Yellow), (*d).into()])),
+    );
+    lines.push(Line::raw(""));
+    lines.push(Line::from(
+        "Press any key to close".fg(Color::DarkGray).italic(),
+    ));
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
             .block(
                 Block::default()
                     .title(" Help ")
@@ -608,22 +506,22 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
                     .border_style(Style::default().fg(Color::Cyan)),
             )
             .style(Style::default().bg(Color::Black)),
-        popup,
+        area,
     );
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+fn centered_rect(w: u16, h: u16, area: Rect) -> Rect {
     let v = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage((100 - h) / 2),
+        Constraint::Percentage(h),
+        Constraint::Percentage((100 - h) / 2),
     ])
     .split(area);
 
     Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage((100 - w) / 2),
+        Constraint::Percentage(w),
+        Constraint::Percentage((100 - w) / 2),
     ])
     .split(v[1])[1]
 }
@@ -632,15 +530,15 @@ fn truncate_key(key: &str) -> String {
     if key.len() > 20 {
         format!("{}…{}", &key[..8], &key[key.len() - 8..])
     } else {
-        key.to_string()
+        key.into()
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
-    match bytes {
-        b if b >= GIB => format!("{:.2} GiB", b as f64 / GIB as f64),
-        b if b >= MIB => format!("{:.2} MiB", b as f64 / MIB as f64),
-        b if b >= KIB => format!("{:.2} KiB", b as f64 / KIB as f64),
-        b => format!("{b} B"),
+fn format_bytes(b: u64) -> String {
+    match b {
+        _ if b >= GIB => format!("{:.2} GiB", b as f64 / GIB as f64),
+        _ if b >= MIB => format!("{:.2} MiB", b as f64 / MIB as f64),
+        _ if b >= KIB => format!("{:.2} KiB", b as f64 / KIB as f64),
+        _ => format!("{b} B"),
     }
 }
