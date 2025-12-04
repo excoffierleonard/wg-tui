@@ -55,6 +55,14 @@ pub fn wg_quick(action: &str, name: &str) -> Result<(), String> {
         .ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().into())
 }
 
+pub fn delete_tunnel(name: &str, is_active: bool) -> Result<(), String> {
+    if is_active {
+        wg_quick("down", name)?;
+    }
+    let path = format!("{CONFIG_DIR}/{name}.conf");
+    fs::remove_file(&path).map_err(|e| format!("Failed to delete {path}: {e}"))
+}
+
 fn parse_wg_output(output: &str) -> InterfaceInfo {
     let mut info = InterfaceInfo::default();
     let mut peer: Option<PeerInfo> = None;

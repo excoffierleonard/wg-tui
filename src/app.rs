@@ -11,8 +11,10 @@ use ratatui::{
 
 use crate::{
     types::{Message, Tunnel},
-    ui::{bordered_block, label, peer_lines, render_help, section, truncate_key},
-    wireguard::{discover_tunnels, get_interface_info, is_interface_active, wg_quick},
+    ui::{bordered_block, label, peer_lines, render_confirm, render_help, section, truncate_key},
+    wireguard::{
+        delete_tunnel, discover_tunnels, get_interface_info, is_interface_active, wg_quick,
+    },
 };
 
 pub struct App {
@@ -20,6 +22,7 @@ pub struct App {
     list_state: ListState,
     show_details: bool,
     show_help: bool,
+    confirm_delete: bool,
     message: Option<Message>,
     pub should_quit: bool,
 }
@@ -37,6 +40,7 @@ impl App {
             list_state: ListState::default(),
             show_details: false,
             show_help: false,
+            confirm_delete: false,
             message: None,
             should_quit: false,
         };
@@ -96,6 +100,21 @@ impl App {
         }
     }
 
+    fn delete_selected(&mut self) {
+        let Some(tunnel) = self.selected() else {
+            return;
+        };
+        let (name, active) = (tunnel.name.clone(), tunnel.is_active);
+
+        match delete_tunnel(&name, active) {
+            Ok(()) => {
+                self.message = Some(Message::Success(format!("Tunnel '{name}' deleted")));
+                self.refresh_tunnels();
+            }
+            Err(e) => self.message = Some(Message::Error(e)),
+        }
+    }
+
     pub fn handle_events(&mut self) -> std::io::Result<()> {
         if !event::poll(Duration::from_millis(100))? {
             return Ok(());
@@ -115,6 +134,20 @@ impl App {
             return Ok(());
         }
 
+        if self.confirm_delete {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.confirm_delete = false;
+                    self.delete_selected();
+                }
+                _ => {
+                    self.confirm_delete = false;
+                    self.message = Some(Message::Info("Delete cancelled".into()));
+                }
+            }
+            return Ok(());
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Char('q') | KeyCode::Esc, _) => self.should_quit = true,
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => self.should_quit = true,
@@ -126,6 +159,11 @@ impl App {
                 .select(Some(self.tunnels.len().saturating_sub(1))),
             (KeyCode::Enter | KeyCode::Char(' '), _) => self.toggle_selected(),
             (KeyCode::Char('d'), _) => self.show_details = !self.show_details,
+            (KeyCode::Char('x'), _) => {
+                if self.selected().is_some() {
+                    self.confirm_delete = true;
+                }
+            }
             (KeyCode::Char('r'), _) => {
                 self.refresh_tunnels();
                 self.message = Some(Message::Info("Refreshed".into()));
@@ -160,6 +198,11 @@ impl App {
         }
         if self.show_help {
             render_help(frame);
+        }
+        if self.confirm_delete
+            && let Some(tunnel) = self.selected()
+        {
+            render_confirm(frame, &tunnel.name);
         }
     }
 

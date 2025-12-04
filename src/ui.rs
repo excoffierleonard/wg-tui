@@ -58,6 +58,37 @@ pub fn peer_lines(peer: &PeerInfo) -> Vec<Line<'static>> {
     lines
 }
 
+pub fn render_confirm(f: &mut Frame, name: &str) {
+    let area = centered_rect(40, 20, f.area());
+    f.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from("Delete tunnel?".fg(Color::Red).bold()),
+        Line::raw(""),
+        Line::from(format!("'{name}'").fg(Color::Yellow)),
+        Line::raw(""),
+        Line::from(vec![
+            "y".fg(Color::Green).bold(),
+            " to confirm, ".into(),
+            "any key".fg(Color::Yellow),
+            " to cancel".into(),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title(" Confirm ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Red)),
+            )
+            .style(Style::default().bg(Color::Black))
+            .alignment(ratatui::layout::Alignment::Center),
+        area,
+    );
+}
+
 pub fn render_help(f: &mut Frame) {
     let area = centered_rect(50, 60, f.area());
     f.render_widget(Clear, area);
@@ -68,6 +99,7 @@ pub fn render_help(f: &mut Frame) {
         ("g / G", "First / Last"),
         ("Enter", "Toggle tunnel"),
         ("d", "Toggle details"),
+        ("x", "Delete tunnel"),
         ("r", "Refresh"),
         ("?", "Help"),
         ("q", "Quit"),
