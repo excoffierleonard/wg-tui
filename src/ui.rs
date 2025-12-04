@@ -89,6 +89,74 @@ pub fn render_confirm(f: &mut Frame, name: &str) {
     );
 }
 
+pub fn render_add_menu(f: &mut Frame) {
+    let area = centered_rect(40, 25, f.area());
+    f.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from("Add Tunnel".fg(Color::Cyan).bold()),
+        Line::raw(""),
+        Line::from(vec![
+            "i".fg(Color::Yellow).bold(),
+            " / ".into(),
+            "1".fg(Color::Yellow).bold(),
+            "  Import from file".into(),
+        ]),
+        Line::raw(""),
+        Line::from("Esc".fg(Color::DarkGray).italic()),
+        Line::from("to cancel".fg(Color::DarkGray).italic()),
+    ];
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title(" Add ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .style(Style::default().bg(Color::Black))
+            .alignment(ratatui::layout::Alignment::Center),
+        area,
+    );
+}
+
+pub fn render_input(f: &mut Frame, title: &str, prompt: &str, value: &str, hint: Option<&str>) {
+    let area = centered_rect(70, 30, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines = vec![
+        Line::from(prompt.fg(Color::Yellow)),
+        Line::raw(""),
+        Line::from(format!("{value}█")),
+        Line::raw(""),
+    ];
+
+    if let Some(h) = hint {
+        lines.push(Line::from(h.fg(Color::DarkGray).italic()));
+        lines.push(Line::raw(""));
+    }
+
+    lines.push(Line::from(vec![
+        "Enter".fg(Color::Green).bold(),
+        " confirm  ".into(),
+        "Esc".fg(Color::Yellow),
+        " cancel".into(),
+    ]));
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title(format!(" {title} "))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .style(Style::default().bg(Color::Black)),
+        area,
+    );
+}
+
 pub fn render_help(f: &mut Frame) {
     let area = centered_rect(50, 60, f.area());
     f.render_widget(Clear, area);
@@ -99,6 +167,7 @@ pub fn render_help(f: &mut Frame) {
         ("g / G", "First / Last"),
         ("Enter", "Toggle tunnel"),
         ("d", "Toggle details"),
+        ("a", "Add tunnel"),
         ("x", "Delete tunnel"),
         ("r", "Refresh"),
         ("?", "Help"),

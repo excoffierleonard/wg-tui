@@ -11,9 +11,13 @@ use ratatui::{
 
 use crate::{
     types::{Message, Tunnel},
-    ui::{bordered_block, label, peer_lines, render_confirm, render_help, section, truncate_key},
+    ui::{
+        bordered_block, label, peer_lines, render_add_menu, render_confirm, render_help,
+        render_input, section, truncate_key,
+    },
     wireguard::{
-        delete_tunnel, discover_tunnels, get_interface_info, is_interface_active, wg_quick,
+        delete_tunnel, discover_tunnels, get_interface_info, import_tunnel, is_interface_active,
+        wg_quick,
     },
 };
 
@@ -23,6 +27,8 @@ pub struct App {
     show_details: bool,
     show_help: bool,
     confirm_delete: bool,
+    show_add_menu: bool,
+    input_path: Option<String>,
     message: Option<Message>,
     pub should_quit: bool,
 }
@@ -41,6 +47,8 @@ impl App {
             show_details: false,
             show_help: false,
             confirm_delete: false,
+            show_add_menu: false,
+            input_path: None,
             message: None,
             should_quit: false,
         };
@@ -148,6 +156,49 @@ impl App {
             return Ok(());
         }
 
+        if let Some(ref mut path) = self.input_path {
+            match key.code {
+                KeyCode::Enter => {
+                    let path_str = path.clone();
+                    self.input_path = None;
+                    match import_tunnel(&path_str) {
+                        Ok(name) => {
+                            self.message =
+                                Some(Message::Success(format!("Tunnel '{name}' imported")));
+                            self.refresh_tunnels();
+                        }
+                        Err(e) => self.message = Some(Message::Error(e)),
+                    }
+                }
+                KeyCode::Esc => {
+                    self.input_path = None;
+                    self.message = Some(Message::Info("Import cancelled".into()));
+                }
+                KeyCode::Backspace => {
+                    path.pop();
+                }
+                KeyCode::Char(c) => {
+                    path.push(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        if self.show_add_menu {
+            match key.code {
+                KeyCode::Char('i') | KeyCode::Char('1') => {
+                    self.show_add_menu = false;
+                    self.input_path = Some(String::new());
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.show_add_menu = false;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Char('q') | KeyCode::Esc, _) => self.should_quit = true,
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => self.should_quit = true,
@@ -164,6 +215,7 @@ impl App {
                     self.confirm_delete = true;
                 }
             }
+            (KeyCode::Char('a'), _) => self.show_add_menu = true,
             (KeyCode::Char('r'), _) => {
                 self.refresh_tunnels();
                 self.message = Some(Message::Info("Refreshed".into()));
@@ -203,6 +255,21 @@ impl App {
             && let Some(tunnel) = self.selected()
         {
             render_confirm(frame, &tunnel.name);
+        }
+        if self.show_add_menu {
+            render_add_menu(frame);
+        }
+        if let Some(ref path) = self.input_path {
+            let cwd = std::env::current_dir()
+                .map(|p| format!("cwd: {}  (use ~/ for home)", p.display()))
+                .ok();
+            render_input(
+                frame,
+                "Import Tunnel",
+                "File path (.conf):",
+                path,
+                cwd.as_deref(),
+            );
         }
     }
 

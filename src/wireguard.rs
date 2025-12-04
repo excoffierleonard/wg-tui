@@ -63,6 +63,43 @@ pub fn delete_tunnel(name: &str, is_active: bool) -> Result<(), String> {
     fs::remove_file(&path).map_err(|e| format!("Failed to delete {path}: {e}"))
 }
 
+pub fn expand_path(path: &str) -> std::path::PathBuf {
+    let path = path.trim();
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return std::path::PathBuf::from(home).join(rest);
+    }
+    std::path::PathBuf::from(path)
+}
+
+pub fn import_tunnel(source_path: &str) -> Result<String, String> {
+    let source = expand_path(source_path);
+
+    if !source.exists() {
+        return Err(format!("File not found: {}", source.display()));
+    }
+
+    let extension = source.extension().and_then(|e| e.to_str());
+    if extension != Some("conf") {
+        return Err("File must have .conf extension".into());
+    }
+
+    let name = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("Invalid filename")?
+        .to_string();
+
+    let dest = format!("{CONFIG_DIR}/{name}.conf");
+    if std::path::Path::new(&dest).exists() {
+        return Err(format!("Tunnel '{name}' already exists"));
+    }
+
+    fs::copy(&source, &dest).map_err(|e| format!("Failed to copy: {e}"))?;
+    Ok(name)
+}
+
 fn parse_wg_output(output: &str) -> InterfaceInfo {
     let mut info = InterfaceInfo::default();
     let mut peer: Option<PeerInfo> = None;
