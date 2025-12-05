@@ -1,6 +1,9 @@
 use std::{fs, process::Command};
 
-use crate::types::{InterfaceInfo, PeerInfo, Tunnel};
+use crate::{
+    error::Error,
+    types::{InterfaceInfo, PeerInfo, Tunnel},
+};
 
 pub const CONFIG_DIR: &str = "/etc/wireguard";
 
@@ -44,23 +47,18 @@ pub fn get_interface_info(name: &str) -> Option<InterfaceInfo> {
         .then(|| parse_wg_output(&String::from_utf8_lossy(&out.stdout)))
 }
 
-pub fn wg_quick(action: &str, name: &str) -> Result<(), String> {
-    let out = Command::new("wg-quick")
-        .args([action, name])
-        .output()
-        .map_err(|e| e.to_string())?;
-    out.status
-        .success()
-        .then_some(())
-        .ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().into())
+pub fn wg_quick(action: &str, name: &str) -> Result<(), Error> {
+    Command::new("wg-quick").args([action, name]).status()?;
+    Ok(())
 }
 
-pub fn delete_tunnel(name: &str, is_active: bool) -> Result<(), String> {
+pub fn delete_tunnel(name: &str, is_active: bool) -> Result<(), Error> {
     if is_active {
         wg_quick("down", name)?;
     }
     let path = format!("{CONFIG_DIR}/{name}.conf");
-    fs::remove_file(&path).map_err(|e| format!("Failed to delete {path}: {e}"))
+    fs::remove_file(&path)?;
+    Ok(())
 }
 
 pub fn expand_path(path: &str) -> std::path::PathBuf {
@@ -73,30 +71,32 @@ pub fn expand_path(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
-pub fn import_tunnel(source_path: &str) -> Result<String, String> {
+pub fn import_tunnel(source_path: &str) -> Result<String, Error> {
     let source = expand_path(source_path);
 
     if !source.exists() {
-        return Err(format!("File not found: {}", source.display()));
+        return Err(Error::WgTui("Source file does not exist".into()));
     }
 
     let extension = source.extension().and_then(|e| e.to_str());
     if extension != Some("conf") {
-        return Err("File must have .conf extension".into());
+        return Err(Error::WgTui("File must have .conf extension".into()));
     }
 
     let name = source
         .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or("Invalid filename")?
+        .and_then(|n| n.to_str())
+        .ok_or(Error::WgTui(
+            "Could not determine tunnel name from file".into(),
+        ))?
         .to_string();
 
     let dest = format!("{CONFIG_DIR}/{name}.conf");
     if std::path::Path::new(&dest).exists() {
-        return Err(format!("Tunnel '{name}' already exists"));
+        return Err(Error::WgTui(format!("Tunnel '{name}' already exists")));
     }
 
-    fs::copy(&source, &dest).map_err(|e| format!("Failed to copy: {e}"))?;
+    fs::copy(&source, &dest)?;
     Ok(name)
 }
 

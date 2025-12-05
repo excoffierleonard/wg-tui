@@ -1,4 +1,5 @@
 mod app;
+mod error;
 mod types;
 mod ui;
 mod wireguard;

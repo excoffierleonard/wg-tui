@@ -9,6 +9,8 @@ use ratatui::{
     widgets::{List, ListItem, ListState, Paragraph, Wrap},
 };
 
+use crate::error::Error;
+
 use crate::{
     types::{Message, Tunnel},
     ui::{
@@ -104,7 +106,7 @@ impl App {
                 )));
                 self.refresh_tunnels();
             }
-            Err(e) => self.message = Some(Message::Error(e)),
+            Err(e) => self.message = Some(Message::Error(e.to_string())),
         }
     }
 
@@ -119,11 +121,11 @@ impl App {
                 self.message = Some(Message::Success(format!("Tunnel '{name}' deleted")));
                 self.refresh_tunnels();
             }
-            Err(e) => self.message = Some(Message::Error(e)),
+            Err(e) => self.message = Some(Message::Error(e.to_string())),
         }
     }
 
-    pub fn handle_events(&mut self) -> std::io::Result<()> {
+    pub fn handle_events(&mut self) -> Result<(), Error> {
         if !event::poll(Duration::from_millis(100))? {
             return Ok(());
         }
@@ -167,7 +169,7 @@ impl App {
                                 Some(Message::Success(format!("Tunnel '{name}' imported")));
                             self.refresh_tunnels();
                         }
-                        Err(e) => self.message = Some(Message::Error(e)),
+                        Err(e) => self.message = Some(Message::Error(e.to_string())),
                     }
                 }
                 KeyCode::Esc => {
