@@ -75,3 +75,35 @@ jobs:
               with:
                   command: test
                   args: --workspace --all-features --all-targets
+
+    pre-publishing-checks:
+        name: Pre-publishing Checks
+        needs: [code-quality-checks, code-correctness-checks]
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Cache Rust toolchain and dependencies
+              uses: actions/cache@v3
+              with:
+                  path: |
+                      ~/.rustup
+                      ~/.cargo
+                      target
+                  key: ${{ runner.os }}-rust
+
+            - name: Verify Documentation
+              uses: actions-rs/cargo@v1
+              with:
+                  command: doc
+                  args: --no-deps --all-features --document-private-items
+
+            # TODO: Re-enable package checks script when ready, and more for binary upload to github
+            # - name: Run package checks script (cargo package and version checks)
+            #   run: ./scripts/package-checks.sh
+
+            - name: Dry run publish for core crate
+              uses: actions-rs/cargo@v1
+              with:
+                  command: publish
+                  args: --dry-run
