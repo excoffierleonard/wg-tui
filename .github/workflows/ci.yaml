@@ -1,0 +1,77 @@
+name: CI
+
+permissions:
+    contents: read
+
+on:
+    pull_request:
+        branches: [main]
+    push:
+        branches: [main]
+
+jobs:
+    code-quality-checks:
+        name: Code Quality Checks
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Cache Rust toolchain and dependencies
+              uses: actions/cache@v3
+              with:
+                  path: |
+                      ~/.rustup
+                      ~/.cargo
+                      target
+                  key: ${{ runner.os }}-rust
+
+            - name: Add musl target
+              run: rustup target add x86_64-unknown-linux-musl
+
+            - name: Format
+              uses: actions-rs/cargo@v1
+              with:
+                  command: fmt
+                  args: --all -- --check
+
+            - name: Lint
+              uses: actions-rs/cargo@v1
+              with:
+                  command: clippy
+                  args: --workspace --all-features --all-targets -- -D warnings
+
+    code-correctness-checks:
+        name: Code Correctness Checks
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Cache Rust toolchain and dependencies
+              uses: actions/cache@v3
+              with:
+                  path: |
+                      ~/.rustup
+                      ~/.cargo
+                      target
+                  key: ${{ runner.os }}-rust
+
+            - name: Add musl target
+              run: rustup target add x86_64-unknown-linux-musl
+
+            - name: Check
+              uses: actions-rs/cargo@v1
+              with:
+                  command: check
+                  args: --workspace --all-features --all-targets
+
+            - name: Build
+              uses: actions-rs/cargo@v1
+              with:
+                  command: build
+                  args: --workspace --all-features --all-targets
+
+            - name: Test
+              uses: actions-rs/cargo@v1
+              with:
+                  command: test
+                  args: --workspace --all-features --all-targets
