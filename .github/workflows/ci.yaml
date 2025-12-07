@@ -98,5 +98,8 @@ jobs:
                   command: doc
                   args: --no-deps --all-features --document-private-items
 
+            - name: Install sys-deps needed for crate publishing checks
+              run: sudo apt install wireguard
+
             - name: Dry run publish for core crate
               run: cargo publish --dry-run 2>&1 | tee /dev/stderr | (! grep -q "^warning:")
