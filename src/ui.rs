@@ -168,6 +168,7 @@ pub fn render_help(f: &mut Frame) {
         ("Enter", "Toggle tunnel"),
         ("d", "Toggle details"),
         ("a", "Add tunnel"),
+        ("e", "Export all tunnels to zip"),
         ("x", "Delete tunnel"),
         ("r", "Refresh"),
         ("?", "Help"),

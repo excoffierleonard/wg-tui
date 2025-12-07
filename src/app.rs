@@ -18,8 +18,8 @@ use crate::{
         render_input, section, truncate_key,
     },
     wireguard::{
-        delete_tunnel, discover_tunnels, get_interface_info, import_tunnel, is_interface_active,
-        wg_quick,
+        delete_tunnel, discover_tunnels, export_tunnels_to_zip, get_interface_info, import_tunnel,
+        is_interface_active, wg_quick,
     },
 };
 
@@ -31,6 +31,7 @@ pub struct App {
     confirm_delete: bool,
     show_add_menu: bool,
     input_path: Option<String>,
+    export_path: Option<String>,
     message: Option<Message>,
     pub should_quit: bool,
 }
@@ -51,6 +52,7 @@ impl App {
             confirm_delete: false,
             show_add_menu: false,
             input_path: None,
+            export_path: None,
             message: None,
             should_quit: false,
         };
@@ -187,6 +189,37 @@ impl App {
             return Ok(());
         }
 
+        if let Some(ref mut path) = self.export_path {
+            match key.code {
+                KeyCode::Enter => {
+                    let path_str = path.clone();
+                    self.export_path = None;
+                    match export_tunnels_to_zip(&path_str) {
+                        Ok(dest) => {
+                            self.message = Some(Message::Success(format!(
+                                "Exported {} tunnels to {}",
+                                self.tunnels.len(),
+                                dest.display()
+                            )));
+                        }
+                        Err(e) => self.message = Some(Message::Error(e.to_string())),
+                    }
+                }
+                KeyCode::Esc => {
+                    self.export_path = None;
+                    self.message = Some(Message::Info("Export cancelled".into()));
+                }
+                KeyCode::Backspace => {
+                    path.pop();
+                }
+                KeyCode::Char(c) => {
+                    path.push(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if self.show_add_menu {
             match key.code {
                 KeyCode::Char('i') | KeyCode::Char('1') => {
@@ -218,6 +251,13 @@ impl App {
                 }
             }
             (KeyCode::Char('a'), _) => self.show_add_menu = true,
+            (KeyCode::Char('e'), _) => {
+                if self.tunnels.is_empty() {
+                    self.message = Some(Message::Error("No tunnels to export".into()));
+                } else {
+                    self.export_path = Some("wg-tunnels.zip".into());
+                }
+            }
             (KeyCode::Char('r'), _) => {
                 self.refresh_tunnels();
                 self.message = Some(Message::Info("Refreshed".into()));
@@ -271,6 +311,24 @@ impl App {
                 "File path (.conf):",
                 path,
                 cwd.as_deref(),
+            );
+        }
+        if let Some(ref path) = self.export_path {
+            let hint = std::env::current_dir()
+                .map(|p| {
+                    format!(
+                        "{} tunnel(s) — cwd: {}  (use ~/ for home)",
+                        self.tunnels.len(),
+                        p.display()
+                    )
+                })
+                .ok();
+            render_input(
+                frame,
+                "Export All Tunnels",
+                "Destination (.zip):",
+                path,
+                hint.as_deref(),
             );
         }
     }

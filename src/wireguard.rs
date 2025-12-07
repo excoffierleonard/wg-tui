@@ -1,4 +1,6 @@
-use std::{fs, process::Command};
+use std::{fs, io::Write, path::PathBuf, process::Command};
+
+use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
     error::Error,
@@ -98,6 +100,30 @@ pub fn import_tunnel(source_path: &str) -> Result<String, Error> {
 
     fs::copy(&source, &dest)?;
     Ok(name)
+}
+
+pub fn export_tunnels_to_zip(dest_path: &str) -> Result<PathBuf, Error> {
+    let dest = expand_path(dest_path);
+
+    let tunnels = discover_tunnels();
+    if tunnels.is_empty() {
+        return Err(Error::WgTui("No tunnels to export".into()));
+    }
+
+    let file = fs::File::create(&dest)?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    for tunnel in &tunnels {
+        let content = fs::read_to_string(&tunnel.config_path)?;
+        let filename = format!("{}.conf", tunnel.name);
+        zip.start_file(&filename, options)?;
+        zip.write_all(content.as_bytes())?;
+    }
+
+    zip.finish()?;
+
+    Ok(dest)
 }
 
 fn parse_wg_output(output: &str) -> InterfaceInfo {
