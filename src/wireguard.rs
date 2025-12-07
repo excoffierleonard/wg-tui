@@ -48,7 +48,7 @@ pub fn get_interface_info(name: &str) -> Option<InterfaceInfo> {
 }
 
 pub fn wg_quick(action: &str, name: &str) -> Result<(), Error> {
-    Command::new("wg-quick").args([action, name]).status()?;
+    Command::new("wg-quick").args([action, name]).output()?;
     Ok(())
 }
 
