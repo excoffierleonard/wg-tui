@@ -105,4 +105,5 @@ jobs:
           args: --no-deps --all-features --document-private-items
 
       - name: Dry run publish for core crate
-        run: cargo publish --dry-run 2>&1 | tee /dev/stderr | (! grep -q "^warning:")
+        run: |
+          cargo publish --dry-run 2>&1 | tee /dev/stderr | (! grep -q -v "^warning: aborting upload due to dry run" | grep -q "^warning:")
