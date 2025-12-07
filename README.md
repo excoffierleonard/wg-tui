@@ -20,8 +20,16 @@ A terminal user interface for managing WireGuard VPN tunnels.
 
 ## Installation
 
+### With Cargo
+
 ```bash
 cargo install --path .
+```
+
+### For Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/excoffierleonard/wg-tui/main/scripts/install.sh | sh
 ```
 
 ## Usage
