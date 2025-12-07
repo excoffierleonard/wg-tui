@@ -1,13 +1,14 @@
 [package]
 name = "wg-tui"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A terminal user interface for managing WireGuard VPN tunnels"
-license = "MIT"
 repository = "https://github.com/excoffierleonard/wg-tui"
+documentation = "https://docs.rs/wg-tui"
 keywords = ["wireguard", "vpn", "tui", "terminal", "network"]
 categories = ["network-programming", "gui"]
 readme = "README.md"
+license = "MIT"
 
 [dependencies]
 color-eyre = "0.6.5"
