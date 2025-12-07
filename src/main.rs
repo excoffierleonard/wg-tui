@@ -1,11 +1,18 @@
 use std::process::Command;
 
+use clap::Parser;
 use color_eyre::{Result, eyre::bail};
 use wg_tui::{App, check_dependencies};
+
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {}
 
 const CMD_SUDO: &str = "sudo";
 
 fn main() -> Result<()> {
+    Cli::parse();
+
     color_eyre::install()?;
 
     if !nix::unistd::geteuid().is_root() {
