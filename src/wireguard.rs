@@ -9,9 +9,30 @@ use crate::{
 
 pub const CONFIG_DIR: &str = "/etc/wireguard";
 
+const CMD_WG: &str = "wg";
+const CMD_WG_QUICK: &str = "wg-quick";
+const CMD_IP: &str = "ip";
+const CMD_WHICH: &str = "which";
+
 const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
 const GIB: u64 = MIB * 1024;
+
+/// Checks if required WireGuard dependencies are installed.
+/// Returns a list of missing commands.
+pub fn check_dependencies() -> Vec<&'static str> {
+    [CMD_WG, CMD_WG_QUICK, CMD_IP]
+        .into_iter()
+        .filter(|cmd| !command_exists(cmd))
+        .collect()
+}
+
+fn command_exists(cmd: &str) -> bool {
+    Command::new(CMD_WHICH)
+        .arg(cmd)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
 
 pub fn discover_tunnels() -> Vec<Tunnel> {
     let Ok(entries) = fs::read_dir(CONFIG_DIR) else {
@@ -36,21 +57,36 @@ pub fn discover_tunnels() -> Vec<Tunnel> {
 }
 
 pub fn is_interface_active(name: &str) -> bool {
-    Command::new("ip")
-        .args(["link", "show", name])
+    Command::new(CMD_IP)
+        .arg("link")
+        .arg("show")
+        .arg(name)
         .output()
         .is_ok_and(|o| o.status.success())
 }
 
 pub fn get_interface_info(name: &str) -> Option<InterfaceInfo> {
-    let out = Command::new("wg").args(["show", name]).output().ok()?;
-    out.status
+    let output = Command::new(CMD_WG).arg("show").arg(name).output().ok()?;
+
+    output
+        .status
         .success()
-        .then(|| parse_wg_output(&String::from_utf8_lossy(&out.stdout)))
+        .then(|| parse_wg_output(&String::from_utf8_lossy(&output.stdout)))
 }
 
 pub fn wg_quick(action: &str, name: &str) -> Result<(), Error> {
-    Command::new("wg-quick").args([action, name]).output()?;
+    let output = Command::new(CMD_WG_QUICK).arg(action).arg(name).output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = stderr.trim();
+        return Err(Error::WgTui(if msg.is_empty() {
+            format!("wg-quick {action} failed")
+        } else {
+            msg.to_string()
+        }));
+    }
+
     Ok(())
 }
 

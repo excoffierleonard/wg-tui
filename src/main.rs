@@ -1,14 +1,22 @@
 use std::process::Command;
 
-use color_eyre::Result;
-use wg_tui::App;
+use color_eyre::{Result, eyre::bail};
+use wg_tui::{App, check_dependencies};
+
+const CMD_SUDO: &str = "sudo";
 
 fn main() -> Result<()> {
     color_eyre::install()?;
 
     if !nix::unistd::geteuid().is_root() {
-        let status = Command::new("sudo").args(std::env::args()).status()?;
+        let args: Vec<_> = std::env::args().collect();
+        let status = Command::new(CMD_SUDO).args(&args).status()?;
         std::process::exit(status.code().unwrap_or(1));
+    }
+
+    let missing = check_dependencies();
+    if !missing.is_empty() {
+        bail!("Missing required dependencies: {}", missing.join(", "));
     }
 
     let mut terminal = ratatui::init();
