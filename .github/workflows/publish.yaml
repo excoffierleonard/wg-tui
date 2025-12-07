@@ -1,38 +1,38 @@
-# name: Publish
+name: Publish
 
-# permissions:
-#     contents: read
+permissions:
+  contents: read
 
-# on:
-#     workflow_run:
-#         workflows: ["CI"]
-#         branches: [main]
-#         types: [completed]
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
 
-# jobs:
-#     publish:
-#         name: Publish
-#         runs-on: ubuntu-latest
-#         environment: production
-#         steps:
-#             - uses: actions/checkout@v4
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
 
-#             - name: Cache Rust toolchain and dependencies
-#               uses: actions/cache@v3
-#               with:
-#                   path: |
-#                       ~/.rustup
-#                       ~/.cargo
-#                       target
-#                   key: ${{ runner.os }}-rust-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache Rust toolchain and dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo
+            target
+          key: ${{ runner.os }}-rust
 
-#             - name: Login to crates.io registry
-#               uses: actions-rs/cargo@v1
-#               with:
-#                   command: login
-#                   args: ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Login to crates.io registry
+        uses: actions-rs/cargo@v1
+        with:
+          command: login
+          args: ${{ secrets.TOKEN_CRATES_IO }}
 
-#             - name: Publish crate to crates.io
-#               uses: actions-rs/cargo@v1
-#               with:
-#                   command: publish
+      - name: Publish crate to crates.io
+        uses: actions-rs/cargo@v1
+        with:
+          command: publish
