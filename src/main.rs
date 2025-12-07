@@ -9,8 +9,9 @@ fn main() -> Result<()> {
     color_eyre::install()?;
 
     if !nix::unistd::geteuid().is_root() {
-        let args: Vec<_> = std::env::args().collect();
-        let status = Command::new(CMD_SUDO).args(&args).status()?;
+        let exe = std::env::current_exe()?;
+        let args: Vec<_> = std::env::args().skip(1).collect();
+        let status = Command::new(CMD_SUDO).arg(exe).args(&args).status()?;
         std::process::exit(status.code().unwrap_or(1));
     }
 
