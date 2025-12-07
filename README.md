@@ -23,7 +23,7 @@ A terminal user interface for managing WireGuard VPN tunnels.
 ### With Cargo
 
 ```bash
-cargo install --path .
+cargo install wg-tui
 ```
 
 ### For Linux
