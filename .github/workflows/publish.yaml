@@ -1,7 +1,7 @@
 name: Publish
 
 permissions:
-  contents: read
+  contents: write
 
 on:
   workflow_run:
@@ -10,10 +10,11 @@ on:
     types: [completed]
 
 jobs:
-  publish:
-    name: Publish
+  publish-crates:
+    name: Publish to crates.io
     runs-on: ubuntu-latest
     environment: production
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,3 +37,41 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: publish
+
+  publish-github:
+    name: Publish to GitHub Releases
+    runs-on: ubuntu-latest
+    environment: production
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Rust toolchain and dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo
+            target
+          key: ${{ runner.os }}-rust
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: echo "version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')" >> $GITHUB_OUTPUT
+
+      - name: Prepare release artifact
+        run: |
+          mkdir -p artifacts
+          cp target/x86_64-unknown-linux-musl/release/wg-tui artifacts/wg-tui-${{ steps.version.outputs.version }}-x86_64-unknown-linux-musl
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          files: artifacts/wg-tui-${{ steps.version.outputs.version }}-x86_64-unknown-linux-musl
+          generate_release_notes: true
+          make_latest: true
