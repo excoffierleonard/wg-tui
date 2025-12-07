@@ -1,4 +1,9 @@
-use std::{fs, io::Write, path::PathBuf, process::Command};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use zip::{ZipWriter, write::SimpleFileOptions};
 
@@ -7,7 +12,7 @@ use crate::{
     types::{InterfaceInfo, PeerInfo, Tunnel},
 };
 
-pub const CONFIG_DIR: &str = "/etc/wireguard";
+const CONFIG_DIR: &str = "/etc/wireguard";
 
 const CMD_WG: &str = "wg";
 const CMD_WG_QUICK: &str = "wg-quick";
@@ -35,7 +40,7 @@ fn command_exists(cmd: &str) -> bool {
 }
 
 pub fn discover_tunnels() -> Vec<Tunnel> {
-    let Ok(entries) = fs::read_dir(CONFIG_DIR) else {
+    let Ok(entries) = fs::read_dir(Path::new(CONFIG_DIR)) else {
         return vec![];
     };
 
@@ -94,19 +99,19 @@ pub fn delete_tunnel(name: &str, is_active: bool) -> Result<(), Error> {
     if is_active {
         wg_quick("down", name)?;
     }
-    let path = format!("{CONFIG_DIR}/{name}.conf");
-    fs::remove_file(&path)?;
+    let path = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
+    fs::remove_file(path)?;
     Ok(())
 }
 
-pub fn expand_path(path: &str) -> std::path::PathBuf {
+pub fn expand_path(path: &str) -> PathBuf {
     let path = path.trim();
     if let Some(rest) = path.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")
     {
-        return std::path::PathBuf::from(home).join(rest);
+        return PathBuf::from(home).join(rest);
     }
-    std::path::PathBuf::from(path)
+    PathBuf::from(path)
 }
 
 pub fn import_tunnel(source_path: &str) -> Result<String, Error> {
@@ -129,8 +134,8 @@ pub fn import_tunnel(source_path: &str) -> Result<String, Error> {
         ))?
         .to_string();
 
-    let dest = format!("{CONFIG_DIR}/{name}.conf");
-    if std::path::Path::new(&dest).exists() {
+    let dest = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
+    if dest.exists() {
         return Err(Error::WgTui(format!("Tunnel '{name}' already exists")));
     }
 

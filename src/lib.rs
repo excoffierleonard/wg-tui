@@ -6,4 +6,4 @@ mod wireguard;
 
 pub use app::App;
 pub use types::{InterfaceInfo, Message, PeerInfo, Tunnel};
-pub use wireguard::{CONFIG_DIR, check_dependencies};
+pub use wireguard::check_dependencies;
