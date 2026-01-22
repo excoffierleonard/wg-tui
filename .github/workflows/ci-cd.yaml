@@ -72,6 +72,8 @@ jobs:
     if: github.ref_name == 'main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
 
@@ -83,6 +85,9 @@ jobs:
         with:
           packages: wireguard-tools
           version: 1.0
+
+      - name: Add musl target
+        run: rustup target add x86_64-unknown-linux-musl
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
