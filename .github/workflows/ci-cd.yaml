@@ -54,6 +54,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Cache system dependencies
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: wireguard-tools
+          version: 1.0
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
