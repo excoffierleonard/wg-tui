@@ -5,7 +5,7 @@ compile_error!("wg-tui only supports Linux");
 use std::process::Command;
 
 #[cfg(target_os = "linux")]
-const REQUIRED_COMMANDS: &[&str] = &["wg", "wg-quick", "ip"];
+const REQUIRED_COMMANDS: &[&str] = &["wg", "wg-quick"];
 
 #[cfg(target_os = "linux")]
 fn command_exists(cmd: &str) -> bool {
@@ -31,11 +31,10 @@ fn main() {
 
         if !missing.is_empty() {
             let names: Vec<&str> = missing.iter().copied().copied().collect();
-            println!(
-                "cargo:warning=Missing system dependencies: {}",
+            panic!(
+                "Missing system dependencies: {}. Please install wireguard-tools.",
                 names.join(", ")
             );
-            println!("cargo:warning=Install WireGuard tools to use this application");
         }
     }
 }
