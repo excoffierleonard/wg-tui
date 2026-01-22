@@ -31,7 +31,10 @@ fn main() {
 
         if !missing.is_empty() {
             let names: Vec<&str> = missing.iter().copied().copied().collect();
-            panic!("Missing system dependencies: {}.", names.join(", "));
+            panic!(
+                "Missing system dependencies: {}. Please install wireguard-tools.",
+                names.join(", ")
+            );
         }
     }
 }
