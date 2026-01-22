@@ -1,0 +1,55 @@
+name: CI/CD
+
+permissions:
+  contents: read
+  packages: write
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --all-features --all-targets
+
+      - name: Test
+        run: cargo test --workspace --all-features --all-targets
+
+      - name: Verify Documentation
+        run: cargo doc --no-deps --all-features --document-private-items
+
+      - name: Dry run publish for crate
+        run: |
+          cargo publish --dry-run 2>&1 | tee /dev/stderr | grep -v "^warning: aborting upload due to dry run" | grep -q "^warning:" && exit 1 || true
+
+  publish-crate:
+    name: Publish crate to crates.io
+    needs: ci
+    if: github.ref_name == 'main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }}
