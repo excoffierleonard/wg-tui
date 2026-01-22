@@ -54,6 +54,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Cache system dependencies
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: wireguard-tools
+          version: 1.0
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -68,6 +74,9 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v6
+
+      - name: Add musl target
+        run: rustup target add x86_64-unknown-linux-musl
 
       - name: Cache system dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
