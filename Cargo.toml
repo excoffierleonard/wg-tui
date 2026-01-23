@@ -1,6 +1,6 @@
 [package]
 name = "wg-tui"
-version = "0.1.10"
+version = "0.1.13"
 edition = "2024"
 description = "A terminal user interface for managing WireGuard VPN tunnels"
 repository = "https://github.com/excoffierleonard/wg-tui"
