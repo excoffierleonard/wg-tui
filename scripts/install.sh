@@ -32,4 +32,4 @@ else
 fi
 
 echo "Installed ${BINARY} to ${INSTALL_DIR}/${BINARY}"
-echo "Run 'wg-tui --version' to verify"
+echo "Run '${BINARY} --version' to verify"
