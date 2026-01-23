@@ -74,6 +74,8 @@ jobs:
     environment: production
     permissions:
       contents: write
+    env:
+      BINARY_NAME: wg-tui
     steps:
       - uses: actions/checkout@v6
 
@@ -97,13 +99,13 @@ jobs:
         run: echo "version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')" >> $GITHUB_OUTPUT
 
       - name: Prepare release artifact
-        run: mv target/x86_64-unknown-linux-musl/release/wg-tui wg-tui-${{ steps.version.outputs.version }}-x86_64-unknown-linux-musl
+        run: mv target/x86_64-unknown-linux-musl/release/$BINARY_NAME $BINARY_NAME-${{ steps.version.outputs.version }}-x86_64-unknown-linux-musl
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: ${{ steps.version.outputs.version }}
-          files: wg-tui-${{ steps.version.outputs.version }}-x86_64-unknown-linux-musl
+          files: ${{ env.BINARY_NAME }}-${{ steps.version.outputs.version }}-x86_64-unknown-linux-musl
           generate_release_notes: true
           make_latest: true
