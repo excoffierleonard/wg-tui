@@ -12,14 +12,14 @@ use ratatui::{
 use crate::error::Error;
 
 use crate::{
-    types::{Message, Tunnel},
+    types::{Message, NewTunnelDraft, Tunnel},
     ui::{
-        bordered_block, label, peer_lines, render_add_menu, render_confirm, render_help,
-        render_input, section, truncate_key,
+        bordered_block, label, peer_lines, render_add_menu, render_confirm,
+        render_full_tunnel_warning, render_help, render_input, section, truncate_key,
     },
     wireguard::{
-        delete_tunnel, discover_tunnels, export_tunnels_to_zip, get_interface_info, import_tunnel,
-        is_interface_active, wg_quick,
+        create_tunnel, delete_tunnel, discover_tunnels, export_tunnels_to_zip, get_interface_info,
+        import_tunnel, is_full_tunnel_config, is_interface_active, wg_quick,
     },
 };
 
@@ -29,9 +29,11 @@ pub struct App {
     show_details: bool,
     show_help: bool,
     confirm_delete: bool,
+    confirm_full_tunnel: Option<String>,
     show_add_menu: bool,
     input_path: Option<String>,
     export_path: Option<String>,
+    new_tunnel: Option<NewTunnelWizard>,
     message: Option<Message>,
     pub should_quit: bool,
 }
@@ -50,9 +52,11 @@ impl App {
             show_details: false,
             show_help: false,
             confirm_delete: false,
+            confirm_full_tunnel: None,
             show_add_menu: false,
             input_path: None,
             export_path: None,
+            new_tunnel: None,
             message: None,
             should_quit: false,
         };
@@ -100,7 +104,23 @@ impl App {
         };
         let (name, active) = (tunnel.name.clone(), tunnel.is_active);
 
-        match wg_quick(if active { "down" } else { "up" }, &name) {
+        if !active && is_full_tunnel_config(&name) {
+            self.confirm_full_tunnel = Some(name);
+            return;
+        }
+
+        self.toggle_selected_with_name(&name);
+    }
+
+    fn toggle_selected_with_name(&mut self, name: &str) {
+        let active = self
+            .tunnels
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| t.is_active)
+            .unwrap_or(false);
+
+        match wg_quick(if active { "down" } else { "up" }, name) {
             Ok(()) => {
                 self.message = Some(Message::Success(format!(
                     "Tunnel '{name}' {}",
@@ -155,6 +175,21 @@ impl App {
                 _ => {
                     self.confirm_delete = false;
                     self.message = Some(Message::Info("Delete cancelled".into()));
+                }
+            }
+            return Ok(());
+        }
+
+        if let Some(ref name) = self.confirm_full_tunnel {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let name = name.clone();
+                    self.confirm_full_tunnel = None;
+                    self.toggle_selected_with_name(&name);
+                }
+                _ => {
+                    self.confirm_full_tunnel = None;
+                    self.message = Some(Message::Info("Enable cancelled".into()));
                 }
             }
             return Ok(());
@@ -220,11 +255,54 @@ impl App {
             return Ok(());
         }
 
+        if let Some(ref mut wizard) = self.new_tunnel {
+            match key.code {
+                KeyCode::Enter => {
+                    if let Some(err) = wizard.validate_current() {
+                        self.message = Some(Message::Error(err));
+                        return Ok(());
+                    }
+                    if let Some(next) = wizard.step.next() {
+                        wizard.step = next;
+                    } else {
+                        let draft = wizard.draft.clone();
+                        self.new_tunnel = None;
+                        match create_tunnel(&draft) {
+                            Ok(()) => {
+                                let name = draft.name;
+                                self.message =
+                                    Some(Message::Success(format!("Tunnel '{name}' created")));
+                                self.refresh_tunnels();
+                            }
+                            Err(e) => self.message = Some(Message::Error(e.to_string())),
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    self.new_tunnel = None;
+                    self.message = Some(Message::Info("Create cancelled".into()));
+                }
+                KeyCode::Backspace => {
+                    wizard.current_value_mut().pop();
+                }
+                KeyCode::Char(c) => {
+                    wizard.current_value_mut().push(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if self.show_add_menu {
             match key.code {
                 KeyCode::Char('i') | KeyCode::Char('1') => {
                     self.show_add_menu = false;
                     self.input_path = Some(String::new());
+                }
+                KeyCode::Char('c') | KeyCode::Char('2') => {
+                    self.show_add_menu = false;
+                    let name = self.default_tunnel_name();
+                    self.new_tunnel = Some(NewTunnelWizard::new(name));
                 }
                 KeyCode::Esc | KeyCode::Char('q') => {
                     self.show_add_menu = false;
@@ -298,6 +376,9 @@ impl App {
         {
             render_confirm(frame, &tunnel.name);
         }
+        if let Some(ref name) = self.confirm_full_tunnel {
+            render_full_tunnel_warning(frame, name);
+        }
         if self.show_add_menu {
             render_add_menu(frame);
         }
@@ -328,6 +409,16 @@ impl App {
                 "Export All Tunnels",
                 "Destination (.zip):",
                 path,
+                hint.as_deref(),
+            );
+        }
+        if let Some(ref wizard) = self.new_tunnel {
+            let (title, prompt, hint) = wizard.ui();
+            render_input(
+                frame,
+                &title,
+                prompt,
+                wizard.current_value(),
                 hint.as_deref(),
             );
         }
@@ -438,5 +529,142 @@ impl App {
                 .wrap(Wrap { trim: false }),
             area,
         );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WizardStep {
+    Name,
+    PrivateKey,
+    Address,
+    Dns,
+    PeerPublicKey,
+    AllowedIps,
+    Endpoint,
+}
+
+impl WizardStep {
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::Name => Some(Self::PrivateKey),
+            Self::PrivateKey => Some(Self::Address),
+            Self::Address => Some(Self::Dns),
+            Self::Dns => Some(Self::PeerPublicKey),
+            Self::PeerPublicKey => Some(Self::AllowedIps),
+            Self::AllowedIps => Some(Self::Endpoint),
+            Self::Endpoint => None,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Name => 1,
+            Self::PrivateKey => 2,
+            Self::Address => 3,
+            Self::Dns => 4,
+            Self::PeerPublicKey => 5,
+            Self::AllowedIps => 6,
+            Self::Endpoint => 7,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NewTunnelWizard {
+    step: WizardStep,
+    draft: NewTunnelDraft,
+}
+
+impl NewTunnelWizard {
+    fn new(name: String) -> Self {
+        Self {
+            step: WizardStep::Name,
+            draft: NewTunnelDraft {
+                name,
+                private_key: String::new(),
+                address: "10.0.0.2/32".into(),
+                dns: String::new(),
+                peer_public_key: String::new(),
+                allowed_ips: "0.0.0.0/0, ::/0".into(),
+                endpoint: String::new(),
+            },
+        }
+    }
+
+    fn current_value(&self) -> &str {
+        match self.step {
+            WizardStep::Name => &self.draft.name,
+            WizardStep::PrivateKey => &self.draft.private_key,
+            WizardStep::Address => &self.draft.address,
+            WizardStep::Dns => &self.draft.dns,
+            WizardStep::PeerPublicKey => &self.draft.peer_public_key,
+            WizardStep::AllowedIps => &self.draft.allowed_ips,
+            WizardStep::Endpoint => &self.draft.endpoint,
+        }
+    }
+
+    fn current_value_mut(&mut self) -> &mut String {
+        match self.step {
+            WizardStep::Name => &mut self.draft.name,
+            WizardStep::PrivateKey => &mut self.draft.private_key,
+            WizardStep::Address => &mut self.draft.address,
+            WizardStep::Dns => &mut self.draft.dns,
+            WizardStep::PeerPublicKey => &mut self.draft.peer_public_key,
+            WizardStep::AllowedIps => &mut self.draft.allowed_ips,
+            WizardStep::Endpoint => &mut self.draft.endpoint,
+        }
+    }
+
+    fn ui(&self) -> (String, &'static str, Option<String>) {
+        let title = format!("New Tunnel ({}/7)", self.step.index());
+        let (prompt, hint) = match self.step {
+            WizardStep::Name => ("Interface name:", Some("required".into())),
+            WizardStep::PrivateKey => ("Private key:", Some("required".into())),
+            WizardStep::Address => ("Interface address:", Some("example: 10.0.0.2/32".into())),
+            WizardStep::Dns => ("DNS (optional):", Some("comma-separated".into())),
+            WizardStep::PeerPublicKey => ("Peer public key:", Some("required".into())),
+            WizardStep::AllowedIps => {
+                ("Peer allowed IPs:", Some("default: 0.0.0.0/0, ::/0".into()))
+            }
+            WizardStep::Endpoint => ("Peer endpoint:", Some("host:port".into())),
+        };
+        (title, prompt, hint)
+    }
+
+    fn validate_current(&self) -> Option<String> {
+        let value = self.current_value().trim();
+        match self.step {
+            WizardStep::Name => {
+                if value.is_empty() {
+                    return Some("Interface name is required".into());
+                }
+                if value.chars().any(|c| c.is_whitespace() || c == '/') {
+                    return Some("Interface name cannot contain spaces or '/'".into());
+                }
+            }
+            WizardStep::PrivateKey
+            | WizardStep::Address
+            | WizardStep::PeerPublicKey
+            | WizardStep::AllowedIps
+            | WizardStep::Endpoint => {
+                if value.is_empty() {
+                    return Some("Field is required".into());
+                }
+            }
+            WizardStep::Dns => {}
+        }
+        None
+    }
+}
+
+impl App {
+    fn default_tunnel_name(&self) -> String {
+        for i in 0..1000u32 {
+            let name = format!("wg{i}");
+            if !self.tunnels.iter().any(|t| t.name == name) {
+                return name;
+            }
+        }
+        "wg0".into()
     }
 }

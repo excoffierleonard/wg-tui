@@ -89,6 +89,41 @@ pub fn render_confirm(f: &mut Frame, name: &str) {
     );
 }
 
+pub fn render_full_tunnel_warning(f: &mut Frame, name: &str) {
+    let area = centered_rect(60, 30, f.area());
+    f.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from("Full-tunnel warning".fg(Color::Yellow).bold()),
+        Line::raw(""),
+        Line::from(format!("'{name}'").fg(Color::Cyan)),
+        Line::raw(""),
+        Line::from("AllowedIPs includes a default route.".fg(Color::White)),
+        Line::from("If you're connected via SSH, enabling this".fg(Color::White)),
+        Line::from("may lock you out of the server.".fg(Color::White)),
+        Line::raw(""),
+        Line::from(vec![
+            "y".fg(Color::Green).bold(),
+            " to enable anyway, ".into(),
+            "any key".fg(Color::Yellow),
+            " to cancel".into(),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title(" Warning ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            )
+            .style(Style::default().bg(Color::Black))
+            .alignment(ratatui::layout::Alignment::Center),
+        area,
+    );
+}
+
 pub fn render_add_menu(f: &mut Frame) {
     let area = centered_rect(40, 25, f.area());
     f.render_widget(Clear, area);
@@ -101,6 +136,12 @@ pub fn render_add_menu(f: &mut Frame) {
             " / ".into(),
             "1".fg(Color::Yellow).bold(),
             "  Import from file".into(),
+        ]),
+        Line::from(vec![
+            "c".fg(Color::Yellow).bold(),
+            " / ".into(),
+            "2".fg(Color::Yellow).bold(),
+            "  Create new".into(),
         ]),
         Line::raw(""),
         Line::from("Esc".fg(Color::DarkGray).italic()),

@@ -9,7 +9,7 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
     error::Error,
-    types::{InterfaceInfo, PeerInfo, Tunnel},
+    types::{InterfaceInfo, NewTunnelDraft, PeerInfo, Tunnel},
 };
 
 const CONFIG_DIR: &str = "/etc/wireguard";
@@ -167,6 +167,82 @@ pub fn export_tunnels_to_zip(dest_path: &str) -> Result<PathBuf, Error> {
     Ok(dest)
 }
 
+pub fn is_full_tunnel_config(name: &str) -> bool {
+    let path = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+
+    content.lines().any(|line| {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            return false;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        if key.trim().eq_ignore_ascii_case("AllowedIPs") {
+            return value
+                .split(',')
+                .map(str::trim)
+                .any(|v| v == "0.0.0.0/0" || v == "::/0");
+        }
+        false
+    })
+}
+
+pub fn create_tunnel(draft: &NewTunnelDraft) -> Result<(), Error> {
+    let name = draft.name.trim();
+    if name.is_empty() {
+        return Err(Error::WgTui("Interface name is required".into()));
+    }
+    if name.chars().any(|c| c.is_whitespace() || c == '/') {
+        return Err(Error::WgTui(
+            "Interface name cannot contain spaces or '/'".into(),
+        ));
+    }
+
+    let private_key = draft.private_key.trim();
+    let address = draft.address.trim();
+    let peer_public_key = draft.peer_public_key.trim();
+    let allowed_ips = normalize_list(&draft.allowed_ips);
+    let endpoint = draft.endpoint.trim();
+
+    if private_key.is_empty()
+        || address.is_empty()
+        || peer_public_key.is_empty()
+        || allowed_ips.is_empty()
+        || endpoint.is_empty()
+    {
+        return Err(Error::WgTui("Missing required fields".into()));
+    }
+
+    fs::create_dir_all(CONFIG_DIR)?;
+
+    let path = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
+    if path.exists() {
+        return Err(Error::WgTui(format!("Tunnel '{name}' already exists")));
+    }
+
+    let dns = normalize_list(&draft.dns);
+
+    let mut content = String::new();
+    content.push_str("[Interface]\n");
+    content.push_str(&format!("PrivateKey = {private_key}\n"));
+    content.push_str(&format!("Address = {address}\n"));
+    if !dns.is_empty() {
+        content.push_str(&format!("DNS = {dns}\n"));
+    }
+    content.push('\n');
+    content.push_str("[Peer]\n");
+    content.push_str(&format!("PublicKey = {peer_public_key}\n"));
+    content.push_str(&format!("AllowedIPs = {allowed_ips}\n"));
+    content.push_str(&format!("Endpoint = {endpoint}\n"));
+
+    fs::write(path, content)?;
+    Ok(())
+}
+
 fn parse_wg_output(output: &str) -> InterfaceInfo {
     let mut info = InterfaceInfo::default();
     let mut peer: Option<PeerInfo> = None;
@@ -208,6 +284,15 @@ fn parse_wg_output(output: &str) -> InterfaceInfo {
         info.peers.push(p);
     }
     info
+}
+
+fn normalize_list(value: &str) -> String {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn parse_bytes(s: &str) -> u64 {
