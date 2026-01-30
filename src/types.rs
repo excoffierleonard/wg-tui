@@ -38,6 +38,15 @@ pub struct NewTunnelDraft {
     pub endpoint: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewServerDraft {
+    pub name: String,
+    pub private_key: String,
+    pub address: String,
+    pub listen_port: String,
+    pub egress_interface: String,
+}
+
 #[derive(Clone)]
 pub enum Message {
     Info(String),

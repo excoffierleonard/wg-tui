@@ -125,7 +125,7 @@ pub fn render_full_tunnel_warning(f: &mut Frame, name: &str) {
 }
 
 pub fn render_add_menu(f: &mut Frame) {
-    let area = centered_rect(40, 25, f.area());
+    let area = centered_rect(48, 32, f.area());
     f.render_widget(Clear, area);
 
     let lines = vec![
@@ -141,7 +141,13 @@ pub fn render_add_menu(f: &mut Frame) {
             "c".fg(Color::Yellow).bold(),
             " / ".into(),
             "2".fg(Color::Yellow).bold(),
-            "  Create new".into(),
+            "  Create client".into(),
+        ]),
+        Line::from(vec![
+            "s".fg(Color::Yellow).bold(),
+            " / ".into(),
+            "3".fg(Color::Yellow).bold(),
+            "  Create server".into(),
         ]),
         Line::raw(""),
         Line::from("Esc".fg(Color::DarkGray).italic()),

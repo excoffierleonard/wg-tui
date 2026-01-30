@@ -12,14 +12,16 @@ use ratatui::{
 use crate::error::Error;
 
 use crate::{
-    types::{Message, NewTunnelDraft, Tunnel},
+    types::{Message, NewServerDraft, NewTunnelDraft, Tunnel},
     ui::{
         bordered_block, label, peer_lines, render_add_menu, render_confirm,
         render_full_tunnel_warning, render_help, render_input, section, truncate_key,
     },
     wireguard::{
-        create_tunnel, delete_tunnel, discover_tunnels, export_tunnels_to_zip, get_interface_info,
-        import_tunnel, is_full_tunnel_config, is_interface_active, wg_quick,
+        create_server_tunnel, create_tunnel, default_egress_interface, delete_tunnel,
+        discover_tunnels, export_tunnels_to_zip, generate_private_key, get_interface_info,
+        import_tunnel, is_full_tunnel_config, is_interface_active, suggest_server_address,
+        wg_quick,
     },
 };
 
@@ -258,23 +260,42 @@ impl App {
         if let Some(ref mut wizard) = self.new_tunnel {
             match key.code {
                 KeyCode::Enter => {
-                    if let Some(err) = wizard.validate_current() {
-                        self.message = Some(Message::Error(err));
-                        return Ok(());
-                    }
-                    if let Some(next) = wizard.step.next() {
-                        wizard.step = next;
-                    } else {
-                        let draft = wizard.draft.clone();
-                        self.new_tunnel = None;
-                        match create_tunnel(&draft) {
-                            Ok(()) => {
-                                let name = draft.name;
-                                self.message =
-                                    Some(Message::Success(format!("Tunnel '{name}' created")));
-                                self.refresh_tunnels();
+                    let finished = {
+                        if let Some(err) = wizard.validate_current() {
+                            self.message = Some(Message::Error(err));
+                            return Ok(());
+                        }
+                        wizard.advance()
+                    };
+                    if finished {
+                        let wizard = self.new_tunnel.take().unwrap();
+                        match wizard {
+                            NewTunnelWizard::Client(wizard) => {
+                                let draft = wizard.draft;
+                                match create_tunnel(&draft) {
+                                    Ok(()) => {
+                                        let name = draft.name;
+                                        self.message = Some(Message::Success(format!(
+                                            "Tunnel '{name}' created"
+                                        )));
+                                        self.refresh_tunnels();
+                                    }
+                                    Err(e) => self.message = Some(Message::Error(e.to_string())),
+                                }
                             }
-                            Err(e) => self.message = Some(Message::Error(e.to_string())),
+                            NewTunnelWizard::Server(wizard) => {
+                                let draft = wizard.draft;
+                                match create_server_tunnel(&draft) {
+                                    Ok(()) => {
+                                        let name = draft.name;
+                                        self.message = Some(Message::Success(format!(
+                                            "Tunnel '{name}' created"
+                                        )));
+                                        self.refresh_tunnels();
+                                    }
+                                    Err(e) => self.message = Some(Message::Error(e.to_string())),
+                                }
+                            }
                         }
                     }
                 }
@@ -302,7 +323,27 @@ impl App {
                 KeyCode::Char('c') | KeyCode::Char('2') => {
                     self.show_add_menu = false;
                     let name = self.default_tunnel_name();
-                    self.new_tunnel = Some(NewTunnelWizard::new(name));
+                    self.new_tunnel = Some(NewTunnelWizard::client(name));
+                }
+                KeyCode::Char('s') | KeyCode::Char('3') => {
+                    self.show_add_menu = false;
+                    let name = self.default_tunnel_name();
+                    let address = suggest_server_address();
+                    let egress = default_egress_interface().unwrap_or_default();
+                    let private_key = match generate_private_key() {
+                        Ok(key) => key,
+                        Err(e) => {
+                            self.message = Some(Message::Error(e.to_string()));
+                            return Ok(());
+                        }
+                    };
+                    self.new_tunnel = Some(NewTunnelWizard::server(
+                        name,
+                        address,
+                        "51820".into(),
+                        private_key,
+                        egress,
+                    ));
                 }
                 KeyCode::Esc | KeyCode::Char('q') => {
                     self.show_add_menu = false;
@@ -532,8 +573,71 @@ impl App {
     }
 }
 
+#[derive(Debug, Clone)]
+enum NewTunnelWizard {
+    Client(NewClientWizard),
+    Server(NewServerWizard),
+}
+
+impl NewTunnelWizard {
+    fn client(name: String) -> Self {
+        Self::Client(NewClientWizard::new(name))
+    }
+
+    fn server(
+        name: String,
+        address: String,
+        listen_port: String,
+        private_key: String,
+        egress_interface: String,
+    ) -> Self {
+        Self::Server(NewServerWizard::new(
+            name,
+            address,
+            listen_port,
+            private_key,
+            egress_interface,
+        ))
+    }
+
+    fn current_value(&self) -> &str {
+        match self {
+            Self::Client(wizard) => wizard.current_value(),
+            Self::Server(wizard) => wizard.current_value(),
+        }
+    }
+
+    fn current_value_mut(&mut self) -> &mut String {
+        match self {
+            Self::Client(wizard) => wizard.current_value_mut(),
+            Self::Server(wizard) => wizard.current_value_mut(),
+        }
+    }
+
+    fn ui(&self) -> (String, &'static str, Option<String>) {
+        match self {
+            Self::Client(wizard) => wizard.ui(),
+            Self::Server(wizard) => wizard.ui(),
+        }
+    }
+
+    fn validate_current(&self) -> Option<String> {
+        match self {
+            Self::Client(wizard) => wizard.validate_current(),
+            Self::Server(wizard) => wizard.validate_current(),
+        }
+    }
+
+    fn advance(&mut self) -> bool {
+        match self {
+            Self::Client(wizard) => wizard.advance(),
+            Self::Server(wizard) => wizard.advance(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WizardStep {
+enum ClientWizardStep {
     Name,
     PrivateKey,
     Address,
@@ -543,7 +647,7 @@ enum WizardStep {
     Endpoint,
 }
 
-impl WizardStep {
+impl ClientWizardStep {
     fn next(self) -> Option<Self> {
         match self {
             Self::Name => Some(Self::PrivateKey),
@@ -570,15 +674,15 @@ impl WizardStep {
 }
 
 #[derive(Debug, Clone)]
-struct NewTunnelWizard {
-    step: WizardStep,
+struct NewClientWizard {
+    step: ClientWizardStep,
     draft: NewTunnelDraft,
 }
 
-impl NewTunnelWizard {
+impl NewClientWizard {
     fn new(name: String) -> Self {
         Self {
-            step: WizardStep::Name,
+            step: ClientWizardStep::Name,
             draft: NewTunnelDraft {
                 name,
                 private_key: String::new(),
@@ -593,40 +697,42 @@ impl NewTunnelWizard {
 
     fn current_value(&self) -> &str {
         match self.step {
-            WizardStep::Name => &self.draft.name,
-            WizardStep::PrivateKey => &self.draft.private_key,
-            WizardStep::Address => &self.draft.address,
-            WizardStep::Dns => &self.draft.dns,
-            WizardStep::PeerPublicKey => &self.draft.peer_public_key,
-            WizardStep::AllowedIps => &self.draft.allowed_ips,
-            WizardStep::Endpoint => &self.draft.endpoint,
+            ClientWizardStep::Name => &self.draft.name,
+            ClientWizardStep::PrivateKey => &self.draft.private_key,
+            ClientWizardStep::Address => &self.draft.address,
+            ClientWizardStep::Dns => &self.draft.dns,
+            ClientWizardStep::PeerPublicKey => &self.draft.peer_public_key,
+            ClientWizardStep::AllowedIps => &self.draft.allowed_ips,
+            ClientWizardStep::Endpoint => &self.draft.endpoint,
         }
     }
 
     fn current_value_mut(&mut self) -> &mut String {
         match self.step {
-            WizardStep::Name => &mut self.draft.name,
-            WizardStep::PrivateKey => &mut self.draft.private_key,
-            WizardStep::Address => &mut self.draft.address,
-            WizardStep::Dns => &mut self.draft.dns,
-            WizardStep::PeerPublicKey => &mut self.draft.peer_public_key,
-            WizardStep::AllowedIps => &mut self.draft.allowed_ips,
-            WizardStep::Endpoint => &mut self.draft.endpoint,
+            ClientWizardStep::Name => &mut self.draft.name,
+            ClientWizardStep::PrivateKey => &mut self.draft.private_key,
+            ClientWizardStep::Address => &mut self.draft.address,
+            ClientWizardStep::Dns => &mut self.draft.dns,
+            ClientWizardStep::PeerPublicKey => &mut self.draft.peer_public_key,
+            ClientWizardStep::AllowedIps => &mut self.draft.allowed_ips,
+            ClientWizardStep::Endpoint => &mut self.draft.endpoint,
         }
     }
 
     fn ui(&self) -> (String, &'static str, Option<String>) {
-        let title = format!("New Tunnel ({}/7)", self.step.index());
+        let title = format!("New Tunnel (Client {}/7)", self.step.index());
         let (prompt, hint) = match self.step {
-            WizardStep::Name => ("Interface name:", Some("required".into())),
-            WizardStep::PrivateKey => ("Private key:", Some("required".into())),
-            WizardStep::Address => ("Interface address:", Some("example: 10.0.0.2/32".into())),
-            WizardStep::Dns => ("DNS (optional):", Some("comma-separated".into())),
-            WizardStep::PeerPublicKey => ("Peer public key:", Some("required".into())),
-            WizardStep::AllowedIps => {
+            ClientWizardStep::Name => ("Interface name:", Some("required".into())),
+            ClientWizardStep::PrivateKey => ("Private key:", Some("required".into())),
+            ClientWizardStep::Address => {
+                ("Interface address:", Some("example: 10.0.0.2/32".into()))
+            }
+            ClientWizardStep::Dns => ("DNS (optional):", Some("comma-separated".into())),
+            ClientWizardStep::PeerPublicKey => ("Peer public key:", Some("required".into())),
+            ClientWizardStep::AllowedIps => {
                 ("Peer allowed IPs:", Some("default: 0.0.0.0/0, ::/0".into()))
             }
-            WizardStep::Endpoint => ("Peer endpoint:", Some("host:port".into())),
+            ClientWizardStep::Endpoint => ("Peer endpoint:", Some("host:port".into())),
         };
         (title, prompt, hint)
     }
@@ -634,7 +740,7 @@ impl NewTunnelWizard {
     fn validate_current(&self) -> Option<String> {
         let value = self.current_value().trim();
         match self.step {
-            WizardStep::Name => {
+            ClientWizardStep::Name => {
                 if value.is_empty() {
                     return Some("Interface name is required".into());
                 }
@@ -642,18 +748,149 @@ impl NewTunnelWizard {
                     return Some("Interface name cannot contain spaces or '/'".into());
                 }
             }
-            WizardStep::PrivateKey
-            | WizardStep::Address
-            | WizardStep::PeerPublicKey
-            | WizardStep::AllowedIps
-            | WizardStep::Endpoint => {
+            ClientWizardStep::PrivateKey
+            | ClientWizardStep::Address
+            | ClientWizardStep::PeerPublicKey
+            | ClientWizardStep::AllowedIps
+            | ClientWizardStep::Endpoint => {
                 if value.is_empty() {
                     return Some("Field is required".into());
                 }
             }
-            WizardStep::Dns => {}
+            ClientWizardStep::Dns => {}
         }
         None
+    }
+
+    fn advance(&mut self) -> bool {
+        if let Some(next) = self.step.next() {
+            self.step = next;
+            false
+        } else {
+            true
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerWizardStep {
+    Name,
+    Address,
+    ListenPort,
+    EgressInterface,
+}
+
+impl ServerWizardStep {
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::Name => Some(Self::Address),
+            Self::Address => Some(Self::ListenPort),
+            Self::ListenPort => Some(Self::EgressInterface),
+            Self::EgressInterface => None,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Name => 1,
+            Self::Address => 2,
+            Self::ListenPort => 3,
+            Self::EgressInterface => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NewServerWizard {
+    step: ServerWizardStep,
+    draft: NewServerDraft,
+}
+
+impl NewServerWizard {
+    fn new(
+        name: String,
+        address: String,
+        listen_port: String,
+        private_key: String,
+        egress_interface: String,
+    ) -> Self {
+        Self {
+            step: ServerWizardStep::Name,
+            draft: NewServerDraft {
+                name,
+                private_key,
+                address,
+                listen_port,
+                egress_interface,
+            },
+        }
+    }
+
+    fn current_value(&self) -> &str {
+        match self.step {
+            ServerWizardStep::Name => &self.draft.name,
+            ServerWizardStep::Address => &self.draft.address,
+            ServerWizardStep::ListenPort => &self.draft.listen_port,
+            ServerWizardStep::EgressInterface => &self.draft.egress_interface,
+        }
+    }
+
+    fn current_value_mut(&mut self) -> &mut String {
+        match self.step {
+            ServerWizardStep::Name => &mut self.draft.name,
+            ServerWizardStep::Address => &mut self.draft.address,
+            ServerWizardStep::ListenPort => &mut self.draft.listen_port,
+            ServerWizardStep::EgressInterface => &mut self.draft.egress_interface,
+        }
+    }
+
+    fn ui(&self) -> (String, &'static str, Option<String>) {
+        let title = format!("New Tunnel (Server {}/4)", self.step.index());
+        let (prompt, hint) = match self.step {
+            ServerWizardStep::Name => ("Interface name:", Some("required".into())),
+            ServerWizardStep::Address => ("Server address:", Some("example: 10.0.0.1/32".into())),
+            ServerWizardStep::ListenPort => ("Listen port:", Some("default: 51820".into())),
+            ServerWizardStep::EgressInterface => {
+                let hint = if self.draft.egress_interface.is_empty() {
+                    "required".into()
+                } else {
+                    format!("detected: {}", self.draft.egress_interface)
+                };
+                ("Egress interface:", Some(hint))
+            }
+        };
+        (title, prompt, hint)
+    }
+
+    fn validate_current(&self) -> Option<String> {
+        let value = self.current_value().trim();
+        match self.step {
+            ServerWizardStep::Name => {
+                if value.is_empty() {
+                    return Some("Interface name is required".into());
+                }
+                if value.chars().any(|c| c.is_whitespace() || c == '/') {
+                    return Some("Interface name cannot contain spaces or '/'".into());
+                }
+            }
+            ServerWizardStep::Address
+            | ServerWizardStep::ListenPort
+            | ServerWizardStep::EgressInterface => {
+                if value.is_empty() {
+                    return Some("Field is required".into());
+                }
+            }
+        }
+        None
+    }
+
+    fn advance(&mut self) -> bool {
+        if let Some(next) = self.step.next() {
+            self.step = next;
+            false
+        } else {
+            true
+        }
     }
 }
 

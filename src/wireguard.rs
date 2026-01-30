@@ -1,6 +1,8 @@
 use std::{
+    collections::HashSet,
     fs,
     io::Write,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -9,7 +11,7 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
     error::Error,
-    types::{InterfaceInfo, NewTunnelDraft, PeerInfo, Tunnel},
+    types::{InterfaceInfo, NewServerDraft, NewTunnelDraft, PeerInfo, Tunnel},
 };
 
 const CONFIG_DIR: &str = "/etc/wireguard";
@@ -59,6 +61,127 @@ pub fn discover_tunnels() -> Vec<Tunnel> {
 
     tunnels.sort_by(|a, b| a.name.cmp(&b.name));
     tunnels
+}
+
+pub fn generate_private_key() -> Result<String, Error> {
+    let output = Command::new(CMD_WG).arg("genkey").output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = stderr.trim();
+        return Err(Error::WgTui(if msg.is_empty() {
+            "wg genkey failed".into()
+        } else {
+            msg.to_string()
+        }));
+    }
+    let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if key.is_empty() {
+        return Err(Error::WgTui("wg genkey returned an empty key".into()));
+    }
+    Ok(key)
+}
+
+pub fn default_egress_interface() -> Option<String> {
+    let outputs = [
+        Command::new(CMD_IP)
+            .args(["-4", "route", "show", "default"])
+            .output()
+            .ok(),
+        Command::new(CMD_IP)
+            .args(["route", "show", "default"])
+            .output()
+            .ok(),
+    ];
+
+    for output in outputs.into_iter().flatten() {
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(dev) = parse_default_route_dev(&stdout) {
+            return Some(dev);
+        }
+    }
+    None
+}
+
+fn parse_default_route_dev(output: &str) -> Option<String> {
+    for line in output.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        while let Some(part) = parts.next() {
+            if part == "dev" {
+                return parts.next().map(str::to_string);
+            }
+        }
+    }
+    None
+}
+
+pub fn suggest_server_address() -> String {
+    let used = used_interface_ipv4_addresses();
+    for i in 0u8..=255 {
+        let candidate = Ipv4Addr::new(10, 0, i, 1);
+        if !used.contains(&candidate) {
+            return format!("{candidate}/32");
+        }
+    }
+    "10.0.0.1/32".into()
+}
+
+fn used_interface_ipv4_addresses() -> HashSet<Ipv4Addr> {
+    let mut used = HashSet::new();
+    for tunnel in discover_tunnels() {
+        if let Ok(content) = fs::read_to_string(&tunnel.config_path) {
+            for addr in parse_interface_addresses(&content) {
+                if let Some(ip) = parse_ipv4_address(&addr) {
+                    used.insert(ip);
+                }
+            }
+        }
+    }
+    used
+}
+
+fn parse_interface_addresses(content: &str) -> Vec<String> {
+    let mut addrs = Vec::new();
+    let mut in_interface = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_interface = line.eq_ignore_ascii_case("[Interface]");
+            continue;
+        }
+        if !in_interface {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("Address") {
+            addrs.extend(
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+
+    addrs
+}
+
+fn parse_ipv4_address(value: &str) -> Option<Ipv4Addr> {
+    let value = value.trim();
+    let ip = value.split_once('/').map(|(ip, _)| ip).unwrap_or(value);
+    ip.parse().ok()
 }
 
 pub fn is_interface_active(name: &str) -> bool {
@@ -238,6 +361,61 @@ pub fn create_tunnel(draft: &NewTunnelDraft) -> Result<(), Error> {
     content.push_str(&format!("PublicKey = {peer_public_key}\n"));
     content.push_str(&format!("AllowedIPs = {allowed_ips}\n"));
     content.push_str(&format!("Endpoint = {endpoint}\n"));
+
+    fs::write(path, content)?;
+    Ok(())
+}
+
+pub fn create_server_tunnel(draft: &NewServerDraft) -> Result<(), Error> {
+    let name = draft.name.trim();
+    if name.is_empty() {
+        return Err(Error::WgTui("Interface name is required".into()));
+    }
+    if name.chars().any(|c| c.is_whitespace() || c == '/') {
+        return Err(Error::WgTui(
+            "Interface name cannot contain spaces or '/'".into(),
+        ));
+    }
+
+    let private_key = draft.private_key.trim();
+    let address = draft.address.trim();
+    let listen_port = draft.listen_port.trim();
+    let egress_interface = draft.egress_interface.trim();
+
+    if private_key.is_empty()
+        || address.is_empty()
+        || listen_port.is_empty()
+        || egress_interface.is_empty()
+    {
+        return Err(Error::WgTui("Missing required fields".into()));
+    }
+
+    let listen_port: u16 = listen_port
+        .parse()
+        .map_err(|_| Error::WgTui("Listen port must be a valid number".into()))?;
+
+    fs::create_dir_all(CONFIG_DIR)?;
+
+    let path = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
+    if path.exists() {
+        return Err(Error::WgTui(format!("Tunnel '{name}' already exists")));
+    }
+
+    let post_up = format!(
+        "iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o {egress_interface} -j MASQUERADE"
+    );
+    let post_down = format!(
+        "iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o {egress_interface} -j MASQUERADE"
+    );
+
+    let mut content = String::new();
+    content.push_str("[Interface]\n");
+    content.push_str(&format!("Address = {address}\n"));
+    content.push_str("SaveConfig = true\n");
+    content.push_str(&format!("PostUp = {post_up}\n"));
+    content.push_str(&format!("PostDown = {post_down}\n"));
+    content.push_str(&format!("ListenPort = {listen_port}\n"));
+    content.push_str(&format!("PrivateKey = {private_key}\n"));
 
     fs::write(path, content)?;
     Ok(())
