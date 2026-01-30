@@ -1,6 +1,7 @@
-use std::time::Duration;
+use std::{fs, time::Duration};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use qrcode::QrCode;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -12,14 +13,17 @@ use ratatui::{
 use crate::error::Error;
 
 use crate::{
-    types::{Message, Tunnel},
+    types::{Message, NewServerDraft, NewTunnelDraft, Tunnel},
     ui::{
-        bordered_block, label, peer_lines, render_add_menu, render_confirm, render_help,
-        render_input, section, truncate_key,
+        bordered_block, label, peer_lines, render_add_menu, render_confirm,
+        render_full_tunnel_warning, render_help, render_input, render_peer_config, render_peer_qr,
+        section, truncate_key,
     },
     wireguard::{
-        delete_tunnel, discover_tunnels, export_tunnels_to_zip, get_interface_info, import_tunnel,
-        is_interface_active, wg_quick,
+        add_server_peer, create_server_tunnel, create_tunnel, default_egress_interface,
+        delete_tunnel, detect_public_ip, discover_tunnels, expand_path, export_tunnels_to_zip,
+        generate_private_key, get_interface_info, import_tunnel, is_full_tunnel_config,
+        is_interface_active, suggest_server_address, wg_quick,
     },
 };
 
@@ -29,9 +33,16 @@ pub struct App {
     show_details: bool,
     show_help: bool,
     confirm_delete: bool,
+    confirm_full_tunnel: Option<String>,
     show_add_menu: bool,
     input_path: Option<String>,
     export_path: Option<String>,
+    new_tunnel: Option<NewTunnelWizard>,
+    pending_peer: Option<PendingPeerConfig>,
+    peer_endpoint_input: Option<String>,
+    peer_dns_input: Option<String>,
+    peer_config: Option<PeerConfigState>,
+    peer_save_path: Option<String>,
     message: Option<Message>,
     pub should_quit: bool,
 }
@@ -50,9 +61,16 @@ impl App {
             show_details: false,
             show_help: false,
             confirm_delete: false,
+            confirm_full_tunnel: None,
             show_add_menu: false,
             input_path: None,
             export_path: None,
+            new_tunnel: None,
+            pending_peer: None,
+            peer_endpoint_input: None,
+            peer_dns_input: None,
+            peer_config: None,
+            peer_save_path: None,
             message: None,
             should_quit: false,
         };
@@ -100,7 +118,23 @@ impl App {
         };
         let (name, active) = (tunnel.name.clone(), tunnel.is_active);
 
-        match wg_quick(if active { "down" } else { "up" }, &name) {
+        if !active && is_full_tunnel_config(&name) {
+            self.confirm_full_tunnel = Some(name);
+            return;
+        }
+
+        self.toggle_selected_with_name(&name);
+    }
+
+    fn toggle_selected_with_name(&mut self, name: &str) {
+        let active = self
+            .tunnels
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| t.is_active)
+            .unwrap_or(false);
+
+        match wg_quick(if active { "down" } else { "up" }, name) {
             Ok(()) => {
                 self.message = Some(Message::Success(format!(
                     "Tunnel '{name}' {}",
@@ -139,101 +173,402 @@ impl App {
             return Ok(());
         }
 
+        self.handle_key(key)
+    }
+
+    fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Result<(), Error> {
         self.message = None;
 
+        if self.consume_help() {
+            return Ok(());
+        }
+        if self.consume_confirm_delete(key) {
+            return Ok(());
+        }
+        if self.consume_confirm_full_tunnel(key) {
+            return Ok(());
+        }
+        if self.consume_peer_save_path(key) {
+            return Ok(());
+        }
+        if self.consume_import_path(key) {
+            return Ok(());
+        }
+        if self.consume_export_path(key) {
+            return Ok(());
+        }
+        if self.consume_peer_endpoint_input(key) {
+            return Ok(());
+        }
+        if self.consume_peer_dns_input(key) {
+            return Ok(());
+        }
+        if self.consume_new_tunnel_wizard(key) {
+            return Ok(());
+        }
+        if self.consume_peer_config(key) {
+            return Ok(());
+        }
+        if self.consume_add_menu(key) {
+            return Ok(());
+        }
+
+        self.handle_global_key(key);
+        Ok(())
+    }
+
+    fn consume_help(&mut self) -> bool {
         if self.show_help {
             self.show_help = false;
-            return Ok(());
+            return true;
         }
+        false
+    }
 
-        if self.confirm_delete {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.confirm_delete = false;
-                    self.delete_selected();
+    fn consume_confirm_delete(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if !self.confirm_delete {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.confirm_delete = false;
+                self.delete_selected();
+            }
+            _ => {
+                self.confirm_delete = false;
+                self.message = Some(Message::Info("Delete cancelled".into()));
+            }
+        }
+        true
+    }
+
+    fn consume_confirm_full_tunnel(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(ref name) = self.confirm_full_tunnel else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let name = name.clone();
+                self.confirm_full_tunnel = None;
+                self.toggle_selected_with_name(&name);
+            }
+            _ => {
+                self.confirm_full_tunnel = None;
+                self.message = Some(Message::Info("Enable cancelled".into()));
+            }
+        }
+        true
+    }
+
+    fn consume_peer_save_path(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(ref mut path) = self.peer_save_path else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                let path_str = path.clone();
+                self.peer_save_path = None;
+                let Some(peer) = &self.peer_config else {
+                    return true;
+                };
+                let dest = expand_path(&path_str);
+                if dest.exists() {
+                    self.message = Some(Message::Error("File already exists".into()));
+                    return true;
                 }
-                _ => {
-                    self.confirm_delete = false;
-                    self.message = Some(Message::Info("Delete cancelled".into()));
+                match fs::write(&dest, &peer.config_text) {
+                    Ok(()) => {
+                        self.message = Some(Message::Success(format!(
+                            "Peer config saved to {}",
+                            dest.display()
+                        )));
+                    }
+                    Err(e) => self.message = Some(Message::Error(e.to_string())),
                 }
             }
-            return Ok(());
+            KeyCode::Esc => {
+                self.peer_save_path = None;
+                self.message = Some(Message::Info("Save cancelled".into()));
+            }
+            KeyCode::Backspace => {
+                path.pop();
+            }
+            KeyCode::Char(c) => {
+                path.push(c);
+            }
+            _ => {}
         }
+        true
+    }
 
-        if let Some(ref mut path) = self.input_path {
-            match key.code {
-                KeyCode::Enter => {
-                    let path_str = path.clone();
-                    self.input_path = None;
-                    match import_tunnel(&path_str) {
-                        Ok(name) => {
-                            self.message =
-                                Some(Message::Success(format!("Tunnel '{name}' imported")));
-                            self.refresh_tunnels();
+    fn consume_import_path(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(ref mut path) = self.input_path else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                let path_str = path.clone();
+                self.input_path = None;
+                match import_tunnel(&path_str) {
+                    Ok(name) => {
+                        self.message = Some(Message::Success(format!("Tunnel '{name}' imported")));
+                        self.refresh_tunnels();
+                    }
+                    Err(e) => self.message = Some(Message::Error(e.to_string())),
+                }
+            }
+            KeyCode::Esc => {
+                self.input_path = None;
+                self.message = Some(Message::Info("Import cancelled".into()));
+            }
+            KeyCode::Backspace => {
+                path.pop();
+            }
+            KeyCode::Char(c) => {
+                path.push(c);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn consume_export_path(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(ref mut path) = self.export_path else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                let path_str = path.clone();
+                self.export_path = None;
+                match export_tunnels_to_zip(&path_str) {
+                    Ok(dest) => {
+                        self.message = Some(Message::Success(format!(
+                            "Exported {} tunnels to {}",
+                            self.tunnels.len(),
+                            dest.display()
+                        )));
+                    }
+                    Err(e) => self.message = Some(Message::Error(e.to_string())),
+                }
+            }
+            KeyCode::Esc => {
+                self.export_path = None;
+                self.message = Some(Message::Info("Export cancelled".into()));
+            }
+            KeyCode::Backspace => {
+                path.pop();
+            }
+            KeyCode::Char(c) => {
+                path.push(c);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn consume_peer_endpoint_input(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(ref mut endpoint) = self.peer_endpoint_input else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                let endpoint_str = endpoint.trim().to_string();
+                if endpoint_str.is_empty() {
+                    self.message = Some(Message::Error("Endpoint is required".into()));
+                    return true;
+                }
+                if let Some(pending) = self.pending_peer.as_mut() {
+                    pending.endpoint = endpoint_str;
+                }
+                self.peer_endpoint_input = None;
+                self.peer_dns_input = Some(String::new());
+            }
+            KeyCode::Esc => {
+                self.peer_endpoint_input = None;
+                self.pending_peer = None;
+                self.message = Some(Message::Info("Peer config cancelled".into()));
+            }
+            KeyCode::Backspace => {
+                endpoint.pop();
+            }
+            KeyCode::Char(c) => {
+                endpoint.push(c);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn consume_peer_dns_input(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(ref mut dns) = self.peer_dns_input else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                let dns_str = dns.trim().to_string();
+                let Some(pending) = self.pending_peer.take() else {
+                    self.peer_dns_input = None;
+                    return true;
+                };
+                let dns_block = if dns_str.is_empty() {
+                    String::new()
+                } else {
+                    format!("DNS = {dns_str}\n")
+                };
+                let config_text = pending
+                    .template
+                    .replace("__ENDPOINT__", &pending.endpoint)
+                    .replace("__DNS_BLOCK__", &dns_block);
+                self.peer_config = Some(PeerConfigState::new(config_text, pending.suggested_path));
+                self.peer_dns_input = None;
+            }
+            KeyCode::Esc => {
+                self.peer_dns_input = None;
+                self.pending_peer = None;
+                self.message = Some(Message::Info("Peer config cancelled".into()));
+            }
+            KeyCode::Backspace => {
+                dns.pop();
+            }
+            KeyCode::Char(c) => {
+                dns.push(c);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn consume_new_tunnel_wizard(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(ref mut wizard) = self.new_tunnel else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                let finished = {
+                    if let Some(err) = wizard.validate_current() {
+                        self.message = Some(Message::Error(err));
+                        return true;
+                    }
+                    wizard.advance()
+                };
+                if finished {
+                    let wizard = self.new_tunnel.take().unwrap();
+                    match wizard {
+                        NewTunnelWizard::Client(wizard) => {
+                            let draft = wizard.draft;
+                            match create_tunnel(&draft) {
+                                Ok(()) => {
+                                    let name = draft.name;
+                                    self.message =
+                                        Some(Message::Success(format!("Tunnel '{name}' created")));
+                                    self.refresh_tunnels();
+                                }
+                                Err(e) => self.message = Some(Message::Error(e.to_string())),
+                            }
                         }
-                        Err(e) => self.message = Some(Message::Error(e.to_string())),
+                        NewTunnelWizard::Server(wizard) => {
+                            let draft = wizard.draft;
+                            match create_server_tunnel(&draft) {
+                                Ok(()) => {
+                                    let name = draft.name;
+                                    self.message =
+                                        Some(Message::Success(format!("Tunnel '{name}' created")));
+                                    self.refresh_tunnels();
+                                }
+                                Err(e) => self.message = Some(Message::Error(e.to_string())),
+                            }
+                        }
                     }
                 }
-                KeyCode::Esc => {
-                    self.input_path = None;
-                    self.message = Some(Message::Info("Import cancelled".into()));
-                }
-                KeyCode::Backspace => {
-                    path.pop();
-                }
-                KeyCode::Char(c) => {
-                    path.push(c);
-                }
-                _ => {}
             }
-            return Ok(());
+            KeyCode::Esc => {
+                self.new_tunnel = None;
+                self.message = Some(Message::Info("Create cancelled".into()));
+            }
+            KeyCode::Backspace => {
+                wizard.current_value_mut().pop();
+            }
+            KeyCode::Char(c) => {
+                wizard.current_value_mut().push(c);
+            }
+            _ => {}
         }
+        true
+    }
 
-        if let Some(ref mut path) = self.export_path {
-            match key.code {
-                KeyCode::Enter => {
-                    let path_str = path.clone();
-                    self.export_path = None;
-                    match export_tunnels_to_zip(&path_str) {
-                        Ok(dest) => {
-                            self.message = Some(Message::Success(format!(
-                                "Exported {} tunnels to {}",
-                                self.tunnels.len(),
-                                dest.display()
-                            )));
-                        }
-                        Err(e) => self.message = Some(Message::Error(e.to_string())),
+    fn consume_peer_config(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(ref mut peer) = self.peer_config else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Char('s') => {
+                self.peer_save_path = Some(peer.suggested_path.clone());
+                peer.show_qr = false;
+            }
+            KeyCode::Char('q') => match QrCode::new(peer.config_text.as_bytes()) {
+                Ok(code) => {
+                    peer.qr_code = Some(code);
+                    peer.show_qr = true;
+                }
+                Err(_) => {
+                    peer.show_qr = false;
+                    self.message = Some(Message::Error("QR data is too large".into()));
+                }
+            },
+            KeyCode::Char('b') => {
+                peer.show_qr = false;
+            }
+            KeyCode::Esc => {
+                self.peer_config = None;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn consume_add_menu(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if !self.show_add_menu {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('i') | KeyCode::Char('1') => {
+                self.show_add_menu = false;
+                self.input_path = Some(String::new());
+            }
+            KeyCode::Char('c') | KeyCode::Char('2') => {
+                self.show_add_menu = false;
+                let name = self.default_tunnel_name();
+                self.new_tunnel = Some(NewTunnelWizard::client(name));
+            }
+            KeyCode::Char('s') | KeyCode::Char('3') => {
+                self.show_add_menu = false;
+                let name = self.default_tunnel_name();
+                let address = suggest_server_address();
+                let egress = default_egress_interface().unwrap_or_default();
+                let private_key = match generate_private_key() {
+                    Ok(key) => key,
+                    Err(e) => {
+                        self.message = Some(Message::Error(e.to_string()));
+                        return true;
                     }
-                }
-                KeyCode::Esc => {
-                    self.export_path = None;
-                    self.message = Some(Message::Info("Export cancelled".into()));
-                }
-                KeyCode::Backspace => {
-                    path.pop();
-                }
-                KeyCode::Char(c) => {
-                    path.push(c);
-                }
-                _ => {}
+                };
+                self.new_tunnel = Some(NewTunnelWizard::server(
+                    name,
+                    address,
+                    "51820".into(),
+                    private_key,
+                    egress,
+                ));
             }
-            return Ok(());
-        }
-
-        if self.show_add_menu {
-            match key.code {
-                KeyCode::Char('i') | KeyCode::Char('1') => {
-                    self.show_add_menu = false;
-                    self.input_path = Some(String::new());
-                }
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    self.show_add_menu = false;
-                }
-                _ => {}
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.show_add_menu = false;
             }
-            return Ok(());
+            _ => {}
         }
+        true
+    }
 
+    fn handle_global_key(&mut self, key: crossterm::event::KeyEvent) {
         match (key.code, key.modifiers) {
             (KeyCode::Char('q') | KeyCode::Esc, _) => self.should_quit = true,
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => self.should_quit = true,
@@ -251,6 +586,27 @@ impl App {
                 }
             }
             (KeyCode::Char('a'), _) => self.show_add_menu = true,
+            (KeyCode::Char('p'), _) => {
+                let Some(tunnel) = self.selected() else {
+                    return;
+                };
+                match add_server_peer(&tunnel.name) {
+                    Ok(peer) => {
+                        let endpoint = detect_public_ip()
+                            .map(|ip| format!("{ip}:{}", peer.listen_port))
+                            .unwrap_or_default();
+                        self.pending_peer = Some(PendingPeerConfig::new(
+                            peer.client_config_template,
+                            peer.suggested_filename,
+                            endpoint.clone(),
+                        ));
+                        self.peer_endpoint_input = Some(endpoint);
+                        self.message = Some(Message::Success("Peer added".into()));
+                        self.refresh_tunnels();
+                    }
+                    Err(e) => self.message = Some(Message::Error(e.to_string())),
+                }
+            }
             (KeyCode::Char('e'), _) => {
                 if self.tunnels.is_empty() {
                     self.message = Some(Message::Error("No tunnels to export".into()));
@@ -265,7 +621,6 @@ impl App {
             (KeyCode::Char('?'), _) => self.show_help = true,
             _ => {}
         }
-        Ok(())
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -298,6 +653,9 @@ impl App {
         {
             render_confirm(frame, &tunnel.name);
         }
+        if let Some(ref name) = self.confirm_full_tunnel {
+            render_full_tunnel_warning(frame, name);
+        }
         if self.show_add_menu {
             render_add_menu(frame);
         }
@@ -329,6 +687,54 @@ impl App {
                 "Destination (.zip):",
                 path,
                 hint.as_deref(),
+            );
+        }
+        if let Some(ref wizard) = self.new_tunnel {
+            let (title, prompt, hint) = wizard.ui();
+            render_input(
+                frame,
+                &title,
+                prompt,
+                wizard.current_value(),
+                hint.as_deref(),
+            );
+        }
+        if let Some(ref endpoint) = self.peer_endpoint_input {
+            render_input(
+                frame,
+                "Peer Endpoint",
+                "Endpoint (host:port):",
+                endpoint,
+                Some("Confirm or edit the server address"),
+            );
+        }
+        if let Some(ref dns) = self.peer_dns_input {
+            render_input(
+                frame,
+                "Peer DNS",
+                "DNS (optional):",
+                dns,
+                Some("Leave empty to skip"),
+            );
+        }
+        if let Some(ref peer) = self.peer_config {
+            if peer.show_qr {
+                if let Some(code) = peer.qr_code.as_ref() {
+                    render_peer_qr(frame, code);
+                } else {
+                    render_peer_config(frame, &peer.config_text, &peer.suggested_path);
+                }
+            } else {
+                render_peer_config(frame, &peer.config_text, &peer.suggested_path);
+            }
+        }
+        if let Some(ref path) = self.peer_save_path {
+            render_input(
+                frame,
+                "Save Peer Config",
+                "Destination (.conf):",
+                path,
+                Some("Press Enter to save"),
             );
         }
     }
@@ -438,5 +844,374 @@ impl App {
                 .wrap(Wrap { trim: false }),
             area,
         );
+    }
+}
+
+#[derive(Clone)]
+struct PeerConfigState {
+    config_text: String,
+    suggested_path: String,
+    show_qr: bool,
+    qr_code: Option<QrCode>,
+}
+
+impl PeerConfigState {
+    fn new(config_text: String, suggested_path: String) -> Self {
+        Self {
+            config_text,
+            suggested_path,
+            show_qr: false,
+            qr_code: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingPeerConfig {
+    template: String,
+    suggested_path: String,
+    endpoint: String,
+}
+
+impl PendingPeerConfig {
+    fn new(template: String, suggested_path: String, endpoint: String) -> Self {
+        Self {
+            template,
+            suggested_path,
+            endpoint,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum NewTunnelWizard {
+    Client(NewClientWizard),
+    Server(NewServerWizard),
+}
+
+impl NewTunnelWizard {
+    fn client(name: String) -> Self {
+        Self::Client(NewClientWizard::new(name))
+    }
+
+    fn server(
+        name: String,
+        address: String,
+        listen_port: String,
+        private_key: String,
+        egress_interface: String,
+    ) -> Self {
+        Self::Server(NewServerWizard::new(
+            name,
+            address,
+            listen_port,
+            private_key,
+            egress_interface,
+        ))
+    }
+
+    fn current_value(&self) -> &str {
+        match self {
+            Self::Client(wizard) => wizard.current_value(),
+            Self::Server(wizard) => wizard.current_value(),
+        }
+    }
+
+    fn current_value_mut(&mut self) -> &mut String {
+        match self {
+            Self::Client(wizard) => wizard.current_value_mut(),
+            Self::Server(wizard) => wizard.current_value_mut(),
+        }
+    }
+
+    fn ui(&self) -> (String, &'static str, Option<String>) {
+        match self {
+            Self::Client(wizard) => wizard.ui(),
+            Self::Server(wizard) => wizard.ui(),
+        }
+    }
+
+    fn validate_current(&self) -> Option<String> {
+        match self {
+            Self::Client(wizard) => wizard.validate_current(),
+            Self::Server(wizard) => wizard.validate_current(),
+        }
+    }
+
+    fn advance(&mut self) -> bool {
+        match self {
+            Self::Client(wizard) => wizard.advance(),
+            Self::Server(wizard) => wizard.advance(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientWizardStep {
+    Name,
+    PrivateKey,
+    Address,
+    Dns,
+    PeerPublicKey,
+    AllowedIps,
+    Endpoint,
+}
+
+impl ClientWizardStep {
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::Name => Some(Self::PrivateKey),
+            Self::PrivateKey => Some(Self::Address),
+            Self::Address => Some(Self::Dns),
+            Self::Dns => Some(Self::PeerPublicKey),
+            Self::PeerPublicKey => Some(Self::AllowedIps),
+            Self::AllowedIps => Some(Self::Endpoint),
+            Self::Endpoint => None,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Name => 1,
+            Self::PrivateKey => 2,
+            Self::Address => 3,
+            Self::Dns => 4,
+            Self::PeerPublicKey => 5,
+            Self::AllowedIps => 6,
+            Self::Endpoint => 7,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NewClientWizard {
+    step: ClientWizardStep,
+    draft: NewTunnelDraft,
+}
+
+impl NewClientWizard {
+    fn new(name: String) -> Self {
+        Self {
+            step: ClientWizardStep::Name,
+            draft: NewTunnelDraft {
+                name,
+                private_key: String::new(),
+                address: "10.0.0.2/32".into(),
+                dns: String::new(),
+                peer_public_key: String::new(),
+                allowed_ips: "0.0.0.0/0, ::/0".into(),
+                endpoint: String::new(),
+            },
+        }
+    }
+
+    fn current_value(&self) -> &str {
+        match self.step {
+            ClientWizardStep::Name => &self.draft.name,
+            ClientWizardStep::PrivateKey => &self.draft.private_key,
+            ClientWizardStep::Address => &self.draft.address,
+            ClientWizardStep::Dns => &self.draft.dns,
+            ClientWizardStep::PeerPublicKey => &self.draft.peer_public_key,
+            ClientWizardStep::AllowedIps => &self.draft.allowed_ips,
+            ClientWizardStep::Endpoint => &self.draft.endpoint,
+        }
+    }
+
+    fn current_value_mut(&mut self) -> &mut String {
+        match self.step {
+            ClientWizardStep::Name => &mut self.draft.name,
+            ClientWizardStep::PrivateKey => &mut self.draft.private_key,
+            ClientWizardStep::Address => &mut self.draft.address,
+            ClientWizardStep::Dns => &mut self.draft.dns,
+            ClientWizardStep::PeerPublicKey => &mut self.draft.peer_public_key,
+            ClientWizardStep::AllowedIps => &mut self.draft.allowed_ips,
+            ClientWizardStep::Endpoint => &mut self.draft.endpoint,
+        }
+    }
+
+    fn ui(&self) -> (String, &'static str, Option<String>) {
+        let title = format!("New Tunnel (Client {}/7)", self.step.index());
+        let (prompt, hint) = match self.step {
+            ClientWizardStep::Name => ("Interface name:", Some("required".into())),
+            ClientWizardStep::PrivateKey => ("Private key:", Some("required".into())),
+            ClientWizardStep::Address => {
+                ("Interface address:", Some("example: 10.0.0.2/32".into()))
+            }
+            ClientWizardStep::Dns => ("DNS (optional):", Some("comma-separated".into())),
+            ClientWizardStep::PeerPublicKey => ("Peer public key:", Some("required".into())),
+            ClientWizardStep::AllowedIps => {
+                ("Peer allowed IPs:", Some("default: 0.0.0.0/0, ::/0".into()))
+            }
+            ClientWizardStep::Endpoint => ("Peer endpoint:", Some("host:port".into())),
+        };
+        (title, prompt, hint)
+    }
+
+    fn validate_current(&self) -> Option<String> {
+        let value = self.current_value().trim();
+        match self.step {
+            ClientWizardStep::Name => {
+                if value.is_empty() {
+                    return Some("Interface name is required".into());
+                }
+                if value.chars().any(|c| c.is_whitespace() || c == '/') {
+                    return Some("Interface name cannot contain spaces or '/'".into());
+                }
+            }
+            ClientWizardStep::PrivateKey
+            | ClientWizardStep::Address
+            | ClientWizardStep::PeerPublicKey
+            | ClientWizardStep::AllowedIps
+            | ClientWizardStep::Endpoint => {
+                if value.is_empty() {
+                    return Some("Field is required".into());
+                }
+            }
+            ClientWizardStep::Dns => {}
+        }
+        None
+    }
+
+    fn advance(&mut self) -> bool {
+        if let Some(next) = self.step.next() {
+            self.step = next;
+            false
+        } else {
+            true
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerWizardStep {
+    Name,
+    Address,
+    ListenPort,
+    EgressInterface,
+}
+
+impl ServerWizardStep {
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::Name => Some(Self::Address),
+            Self::Address => Some(Self::ListenPort),
+            Self::ListenPort => Some(Self::EgressInterface),
+            Self::EgressInterface => None,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Name => 1,
+            Self::Address => 2,
+            Self::ListenPort => 3,
+            Self::EgressInterface => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NewServerWizard {
+    step: ServerWizardStep,
+    draft: NewServerDraft,
+}
+
+impl NewServerWizard {
+    fn new(
+        name: String,
+        address: String,
+        listen_port: String,
+        private_key: String,
+        egress_interface: String,
+    ) -> Self {
+        Self {
+            step: ServerWizardStep::Name,
+            draft: NewServerDraft {
+                name,
+                private_key,
+                address,
+                listen_port,
+                egress_interface,
+            },
+        }
+    }
+
+    fn current_value(&self) -> &str {
+        match self.step {
+            ServerWizardStep::Name => &self.draft.name,
+            ServerWizardStep::Address => &self.draft.address,
+            ServerWizardStep::ListenPort => &self.draft.listen_port,
+            ServerWizardStep::EgressInterface => &self.draft.egress_interface,
+        }
+    }
+
+    fn current_value_mut(&mut self) -> &mut String {
+        match self.step {
+            ServerWizardStep::Name => &mut self.draft.name,
+            ServerWizardStep::Address => &mut self.draft.address,
+            ServerWizardStep::ListenPort => &mut self.draft.listen_port,
+            ServerWizardStep::EgressInterface => &mut self.draft.egress_interface,
+        }
+    }
+
+    fn ui(&self) -> (String, &'static str, Option<String>) {
+        let title = format!("New Tunnel (Server {}/4)", self.step.index());
+        let (prompt, hint) = match self.step {
+            ServerWizardStep::Name => ("Interface name:", Some("required".into())),
+            ServerWizardStep::Address => ("Server address:", Some("example: 10.0.0.1/32".into())),
+            ServerWizardStep::ListenPort => ("Listen port:", Some("default: 51820".into())),
+            ServerWizardStep::EgressInterface => {
+                let hint = if self.draft.egress_interface.is_empty() {
+                    "required".into()
+                } else {
+                    format!("detected: {}", self.draft.egress_interface)
+                };
+                ("Egress interface:", Some(hint))
+            }
+        };
+        (title, prompt, hint)
+    }
+
+    fn validate_current(&self) -> Option<String> {
+        let value = self.current_value().trim();
+        match self.step {
+            ServerWizardStep::Name => {
+                if value.is_empty() {
+                    return Some("Interface name is required".into());
+                }
+                if value.chars().any(|c| c.is_whitespace() || c == '/') {
+                    return Some("Interface name cannot contain spaces or '/'".into());
+                }
+            }
+            ServerWizardStep::Address
+            | ServerWizardStep::ListenPort
+            | ServerWizardStep::EgressInterface => {
+                if value.is_empty() {
+                    return Some("Field is required".into());
+                }
+            }
+        }
+        None
+    }
+
+    fn advance(&mut self) -> bool {
+        if let Some(next) = self.step.next() {
+            self.step = next;
+            false
+        } else {
+            true
+        }
+    }
+}
+
+impl App {
+    fn default_tunnel_name(&self) -> String {
+        for i in 0..1000u32 {
+            let name = format!("wg{i}");
+            if !self.tunnels.iter().any(|t| t.name == name) {
+                return name;
+            }
+        }
+        "wg0".into()
     }
 }

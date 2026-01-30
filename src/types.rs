@@ -27,6 +27,33 @@ pub struct PeerInfo {
     pub transfer_tx: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewTunnelDraft {
+    pub name: String,
+    pub private_key: String,
+    pub address: String,
+    pub dns: String,
+    pub peer_public_key: String,
+    pub allowed_ips: String,
+    pub endpoint: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewServerDraft {
+    pub name: String,
+    pub private_key: String,
+    pub address: String,
+    pub listen_port: String,
+    pub egress_interface: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerConfig {
+    pub client_config_template: String,
+    pub suggested_filename: String,
+    pub listen_port: u16,
+}
+
 #[derive(Clone)]
 pub enum Message {
     Info(String),
