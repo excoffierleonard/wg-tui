@@ -19,7 +19,6 @@ const CONFIG_DIR: &str = "/etc/wireguard";
 const CMD_WG: &str = "wg";
 const CMD_WG_QUICK: &str = "wg-quick";
 const CMD_IP: &str = "ip";
-const CMD_WHICH: &str = "which";
 const CMD_CURL: &str = "curl";
 const CMD_WGET: &str = "wget";
 const ENDPOINT_PLACEHOLDER: &str = "__ENDPOINT__";
@@ -39,10 +38,7 @@ pub fn check_dependencies() -> Vec<&'static str> {
 }
 
 fn command_exists(cmd: &str) -> bool {
-    Command::new(CMD_WHICH)
-        .arg(cmd)
-        .output()
-        .is_ok_and(|o| o.status.success())
+    which::which(cmd).is_ok()
 }
 
 pub fn detect_public_ip() -> Option<String> {
@@ -358,12 +354,7 @@ pub fn delete_tunnel(name: &str, is_active: bool) -> Result<(), Error> {
 
 pub fn expand_path(path: &str) -> PathBuf {
     let path = path.trim();
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    PathBuf::from(path)
+    PathBuf::from(shellexpand::tilde(path).into_owned())
 }
 
 pub fn import_tunnel(source_path: &str) -> Result<String, Error> {

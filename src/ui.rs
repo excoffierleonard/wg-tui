@@ -1,3 +1,4 @@
+use humansize::{BINARY, format_size};
 use qrcode::{QrCode, render::unicode};
 use ratatui::{
     Frame,
@@ -8,10 +9,6 @@ use ratatui::{
 };
 
 use crate::types::PeerInfo;
-
-const KIB: u64 = 1024;
-const MIB: u64 = KIB * 1024;
-const GIB: u64 = MIB * 1024;
 
 pub fn bordered_block(title: Option<&str>) -> Block<'_> {
     let block = Block::default()
@@ -356,10 +353,5 @@ pub fn truncate_key(key: &str) -> String {
 }
 
 pub fn format_bytes(b: u64) -> String {
-    match b {
-        _ if b >= GIB => format!("{:.2} GiB", b as f64 / GIB as f64),
-        _ if b >= MIB => format!("{:.2} MiB", b as f64 / MIB as f64),
-        _ if b >= KIB => format!("{:.2} KiB", b as f64 / KIB as f64),
-        _ => format!("{b} B"),
-    }
+    format_size(b, BINARY)
 }
