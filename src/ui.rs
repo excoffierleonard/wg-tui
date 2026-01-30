@@ -1,9 +1,10 @@
+use qrcode::{QrCode, render::unicode};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Text},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::types::PeerInfo;
@@ -204,6 +205,87 @@ pub fn render_input(f: &mut Frame, title: &str, prompt: &str, value: &str, hint:
     );
 }
 
+pub fn render_peer_config(f: &mut Frame, config: &str, suggested_path: &str) {
+    let area = centered_rect(80, 70, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from("New Peer Config".fg(Color::Cyan).bold()),
+        Line::raw(""),
+    ];
+    lines.extend(config.lines().map(Line::raw));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(format!("Suggested file: {suggested_path}")));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        "s".fg(Color::Green).bold(),
+        " save  ".into(),
+        "q".fg(Color::Yellow).bold(),
+        " qr  ".into(),
+        "Esc".fg(Color::DarkGray),
+        " close".into(),
+    ]));
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title(" Peer ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .style(Style::default().bg(Color::Black))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+pub fn render_peer_qr(f: &mut Frame, qr: &QrCode) {
+    // Render QR code to string with proper aspect ratio using Dense1x2
+    let qr_string = qr
+        .render::<unicode::Dense1x2>()
+        .dark_color(unicode::Dense1x2::Dark)
+        .light_color(unicode::Dense1x2::Light)
+        .build();
+
+    let qr_lines: Vec<Line> = qr_string.lines().map(Line::raw).collect();
+    let qr_width = qr_lines.first().map(|l| l.width()).unwrap_or(0) as u16;
+    let qr_height = qr_lines.len() as u16;
+
+    // Size the box to fit the QR code plus border and footer
+    let box_width = (qr_width + 4).min(f.area().width);
+    let box_height = (qr_height + 4).min(f.area().height); // +4 for border and footer line
+
+    // Center the box
+    let x = f.area().x + (f.area().width.saturating_sub(box_width)) / 2;
+    let y = f.area().y + (f.area().height.saturating_sub(box_height)) / 2;
+    let area = Rect::new(x, y, box_width, box_height);
+
+    f.render_widget(Clear, area);
+
+    let mut lines = qr_lines;
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        "b".fg(Color::Yellow).bold(),
+        " back  ".into(),
+        "Esc".fg(Color::DarkGray),
+        " close".into(),
+    ]));
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title(" Peer Config QR ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .style(Style::default().bg(Color::Black))
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
 pub fn render_help(f: &mut Frame) {
     let area = centered_rect(50, 60, f.area());
     f.render_widget(Clear, area);
@@ -217,6 +299,7 @@ pub fn render_help(f: &mut Frame) {
         ("a", "Add tunnel"),
         ("e", "Export all tunnels to zip"),
         ("x", "Delete tunnel"),
+        ("p", "Add peer (server only)"),
         ("r", "Refresh"),
         ("?", "Help"),
         ("q", "Quit"),

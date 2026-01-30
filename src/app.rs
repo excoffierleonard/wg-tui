@@ -1,6 +1,7 @@
-use std::time::Duration;
+use std::{fs, time::Duration};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use qrcode::QrCode;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -15,13 +16,14 @@ use crate::{
     types::{Message, NewServerDraft, NewTunnelDraft, Tunnel},
     ui::{
         bordered_block, label, peer_lines, render_add_menu, render_confirm,
-        render_full_tunnel_warning, render_help, render_input, section, truncate_key,
+        render_full_tunnel_warning, render_help, render_input, render_peer_config, render_peer_qr,
+        section, truncate_key,
     },
     wireguard::{
-        create_server_tunnel, create_tunnel, default_egress_interface, delete_tunnel,
-        discover_tunnels, export_tunnels_to_zip, generate_private_key, get_interface_info,
-        import_tunnel, is_full_tunnel_config, is_interface_active, suggest_server_address,
-        wg_quick,
+        add_server_peer, create_server_tunnel, create_tunnel, default_egress_interface,
+        delete_tunnel, detect_public_ip, discover_tunnels, expand_path, export_tunnels_to_zip,
+        generate_private_key, get_interface_info, import_tunnel, is_full_tunnel_config,
+        is_interface_active, suggest_server_address, wg_quick,
     },
 };
 
@@ -36,6 +38,11 @@ pub struct App {
     input_path: Option<String>,
     export_path: Option<String>,
     new_tunnel: Option<NewTunnelWizard>,
+    pending_peer: Option<PendingPeerConfig>,
+    peer_endpoint_input: Option<String>,
+    peer_dns_input: Option<String>,
+    peer_config: Option<PeerConfigState>,
+    peer_save_path: Option<String>,
     message: Option<Message>,
     pub should_quit: bool,
 }
@@ -59,6 +66,11 @@ impl App {
             input_path: None,
             export_path: None,
             new_tunnel: None,
+            pending_peer: None,
+            peer_endpoint_input: None,
+            peer_dns_input: None,
+            peer_config: None,
+            peer_save_path: None,
             message: None,
             should_quit: false,
         };
@@ -197,6 +209,44 @@ impl App {
             return Ok(());
         }
 
+        if let Some(ref mut path) = self.peer_save_path {
+            match key.code {
+                KeyCode::Enter => {
+                    let path_str = path.clone();
+                    self.peer_save_path = None;
+                    let Some(peer) = &self.peer_config else {
+                        return Ok(());
+                    };
+                    let dest = expand_path(&path_str);
+                    if dest.exists() {
+                        self.message = Some(Message::Error("File already exists".into()));
+                        return Ok(());
+                    }
+                    match fs::write(&dest, &peer.config_text) {
+                        Ok(()) => {
+                            self.message = Some(Message::Success(format!(
+                                "Peer config saved to {}",
+                                dest.display()
+                            )));
+                        }
+                        Err(e) => self.message = Some(Message::Error(e.to_string())),
+                    }
+                }
+                KeyCode::Esc => {
+                    self.peer_save_path = None;
+                    self.message = Some(Message::Info("Save cancelled".into()));
+                }
+                KeyCode::Backspace => {
+                    path.pop();
+                }
+                KeyCode::Char(c) => {
+                    path.push(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if let Some(ref mut path) = self.input_path {
             match key.code {
                 KeyCode::Enter => {
@@ -251,6 +301,73 @@ impl App {
                 }
                 KeyCode::Char(c) => {
                     path.push(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        if let Some(ref mut endpoint) = self.peer_endpoint_input {
+            match key.code {
+                KeyCode::Enter => {
+                    let endpoint_str = endpoint.trim().to_string();
+                    if endpoint_str.is_empty() {
+                        self.message = Some(Message::Error("Endpoint is required".into()));
+                        return Ok(());
+                    }
+                    if let Some(pending) = self.pending_peer.as_mut() {
+                        pending.endpoint = endpoint_str;
+                    }
+                    self.peer_endpoint_input = None;
+                    self.peer_dns_input = Some(String::new());
+                }
+                KeyCode::Esc => {
+                    self.peer_endpoint_input = None;
+                    self.pending_peer = None;
+                    self.message = Some(Message::Info("Peer config cancelled".into()));
+                }
+                KeyCode::Backspace => {
+                    endpoint.pop();
+                }
+                KeyCode::Char(c) => {
+                    endpoint.push(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        if let Some(ref mut dns) = self.peer_dns_input {
+            match key.code {
+                KeyCode::Enter => {
+                    let dns_str = dns.trim().to_string();
+                    let Some(pending) = self.pending_peer.take() else {
+                        self.peer_dns_input = None;
+                        return Ok(());
+                    };
+                    let dns_block = if dns_str.is_empty() {
+                        String::new()
+                    } else {
+                        format!("DNS = {dns_str}\n")
+                    };
+                    let config_text = pending
+                        .template
+                        .replace("__ENDPOINT__", &pending.endpoint)
+                        .replace("__DNS_BLOCK__", &dns_block);
+                    self.peer_config =
+                        Some(PeerConfigState::new(config_text, pending.suggested_path));
+                    self.peer_dns_input = None;
+                }
+                KeyCode::Esc => {
+                    self.peer_dns_input = None;
+                    self.pending_peer = None;
+                    self.message = Some(Message::Info("Peer config cancelled".into()));
+                }
+                KeyCode::Backspace => {
+                    dns.pop();
+                }
+                KeyCode::Char(c) => {
+                    dns.push(c);
                 }
                 _ => {}
             }
@@ -314,6 +431,35 @@ impl App {
             return Ok(());
         }
 
+        if let Some(ref mut peer) = self.peer_config {
+            match key.code {
+                KeyCode::Char('s') => {
+                    self.peer_save_path = Some(peer.suggested_path.clone());
+                    peer.show_qr = false;
+                }
+                KeyCode::Char('q') => {
+                    match QrCode::new(peer.config_text.as_bytes()) {
+                        Ok(code) => {
+                            peer.qr_code = Some(code);
+                            peer.show_qr = true;
+                        }
+                        Err(_) => {
+                            peer.show_qr = false;
+                            self.message = Some(Message::Error("QR data is too large".into()));
+                        }
+                    };
+                }
+                KeyCode::Char('b') => {
+                    peer.show_qr = false;
+                }
+                KeyCode::Esc => {
+                    self.peer_config = None;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if self.show_add_menu {
             match key.code {
                 KeyCode::Char('i') | KeyCode::Char('1') => {
@@ -370,6 +516,27 @@ impl App {
                 }
             }
             (KeyCode::Char('a'), _) => self.show_add_menu = true,
+            (KeyCode::Char('p'), _) => {
+                let Some(tunnel) = self.selected() else {
+                    return Ok(());
+                };
+                match add_server_peer(&tunnel.name) {
+                    Ok(peer) => {
+                        let endpoint = detect_public_ip()
+                            .map(|ip| format!("{ip}:{}", peer.listen_port))
+                            .unwrap_or_default();
+                        self.pending_peer = Some(PendingPeerConfig::new(
+                            peer.client_config_template,
+                            peer.suggested_filename,
+                            endpoint.clone(),
+                        ));
+                        self.peer_endpoint_input = Some(endpoint);
+                        self.message = Some(Message::Success("Peer added".into()));
+                        self.refresh_tunnels();
+                    }
+                    Err(e) => self.message = Some(Message::Error(e.to_string())),
+                }
+            }
             (KeyCode::Char('e'), _) => {
                 if self.tunnels.is_empty() {
                     self.message = Some(Message::Error("No tunnels to export".into()));
@@ -461,6 +628,44 @@ impl App {
                 prompt,
                 wizard.current_value(),
                 hint.as_deref(),
+            );
+        }
+        if let Some(ref endpoint) = self.peer_endpoint_input {
+            render_input(
+                frame,
+                "Peer Endpoint",
+                "Endpoint (host:port):",
+                endpoint,
+                Some("Confirm or edit the server address"),
+            );
+        }
+        if let Some(ref dns) = self.peer_dns_input {
+            render_input(
+                frame,
+                "Peer DNS",
+                "DNS (optional):",
+                dns,
+                Some("Leave empty to skip"),
+            );
+        }
+        if let Some(ref peer) = self.peer_config {
+            if peer.show_qr {
+                if let Some(code) = peer.qr_code.as_ref() {
+                    render_peer_qr(frame, code);
+                } else {
+                    render_peer_config(frame, &peer.config_text, &peer.suggested_path);
+                }
+            } else {
+                render_peer_config(frame, &peer.config_text, &peer.suggested_path);
+            }
+        }
+        if let Some(ref path) = self.peer_save_path {
+            render_input(
+                frame,
+                "Save Peer Config",
+                "Destination (.conf):",
+                path,
+                Some("Press Enter to save"),
             );
         }
     }
@@ -570,6 +775,42 @@ impl App {
                 .wrap(Wrap { trim: false }),
             area,
         );
+    }
+}
+
+#[derive(Clone)]
+struct PeerConfigState {
+    config_text: String,
+    suggested_path: String,
+    show_qr: bool,
+    qr_code: Option<QrCode>,
+}
+
+impl PeerConfigState {
+    fn new(config_text: String, suggested_path: String) -> Self {
+        Self {
+            config_text,
+            suggested_path,
+            show_qr: false,
+            qr_code: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingPeerConfig {
+    template: String,
+    suggested_path: String,
+    endpoint: String,
+}
+
+impl PendingPeerConfig {
+    fn new(template: String, suggested_path: String, endpoint: String) -> Self {
+        Self {
+            template,
+            suggested_path,
+            endpoint,
+        }
     }
 }
 

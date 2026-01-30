@@ -47,6 +47,13 @@ pub struct NewServerDraft {
     pub egress_interface: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct PeerConfig {
+    pub client_config_template: String,
+    pub suggested_filename: String,
+    pub listen_port: u16,
+}
+
 #[derive(Clone)]
 pub enum Message {
     Info(String),
