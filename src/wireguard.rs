@@ -4,7 +4,7 @@ use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 use zip::{ZipWriter, write::SimpleFileOptions};
@@ -39,6 +39,28 @@ pub fn check_dependencies() -> Vec<&'static str> {
 
 fn command_exists(cmd: &str) -> bool {
     which::which(cmd).is_ok()
+}
+
+fn wg_error(output: &Output, default: &str) -> Error {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let msg = stderr.trim();
+    Error::WgTui(if msg.is_empty() {
+        default.into()
+    } else {
+        msg.to_string()
+    })
+}
+
+fn validate_interface_name(name: &str) -> Result<(), Error> {
+    if name.is_empty() {
+        return Err(Error::WgTui("Interface name is required".into()));
+    }
+    if name.chars().any(|c| c.is_whitespace() || c == '/') {
+        return Err(Error::WgTui(
+            "Interface name cannot contain spaces or '/'".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn detect_public_ip() -> Option<String> {
@@ -92,13 +114,7 @@ pub fn discover_tunnels() -> Vec<Tunnel> {
 pub fn generate_private_key() -> Result<String, Error> {
     let output = Command::new(CMD_WG).arg("genkey").output()?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let msg = stderr.trim();
-        return Err(Error::WgTui(if msg.is_empty() {
-            "wg genkey failed".into()
-        } else {
-            msg.to_string()
-        }));
+        return Err(wg_error(&output, "wg genkey failed"));
     }
     let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if key.is_empty() {
@@ -118,13 +134,7 @@ pub fn derive_public_key(private_key: &str) -> Result<String, Error> {
     }
     let output = child.wait_with_output()?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let msg = stderr.trim();
-        return Err(Error::WgTui(if msg.is_empty() {
-            "wg pubkey failed".into()
-        } else {
-            msg.to_string()
-        }));
+        return Err(wg_error(&output, "wg pubkey failed"));
     }
     let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if key.is_empty() {
@@ -288,13 +298,7 @@ pub fn wg_quick(action: &str, name: &str) -> Result<(), Error> {
     let output = Command::new(CMD_WG_QUICK).arg(action).arg(name).output()?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let msg = stderr.trim();
-        return Err(Error::WgTui(if msg.is_empty() {
-            format!("wg-quick {action} failed")
-        } else {
-            msg.to_string()
-        }));
+        return Err(wg_error(&output, &format!("wg-quick {action} failed")));
     }
 
     Ok(())
@@ -312,13 +316,7 @@ fn sync_interface_with_content(name: &str, content: &str) -> Result<(), Error> {
         .arg(&temp_conf)
         .output()?;
     if !strip_output.status.success() {
-        let stderr = String::from_utf8_lossy(&strip_output.stderr);
-        let msg = stderr.trim();
-        return Err(Error::WgTui(if msg.is_empty() {
-            "wg-quick strip failed".into()
-        } else {
-            msg.to_string()
-        }));
+        return Err(wg_error(&strip_output, "wg-quick strip failed"));
     }
 
     fs::write(&temp_stripped, &strip_output.stdout)?;
@@ -329,13 +327,7 @@ fn sync_interface_with_content(name: &str, content: &str) -> Result<(), Error> {
         .arg(&temp_stripped)
         .output()?;
     if !sync_output.status.success() {
-        let stderr = String::from_utf8_lossy(&sync_output.stderr);
-        let msg = stderr.trim();
-        return Err(Error::WgTui(if msg.is_empty() {
-            "wg syncconf failed".into()
-        } else {
-            msg.to_string()
-        }));
+        return Err(wg_error(&sync_output, "wg syncconf failed"));
     }
 
     let _ = fs::remove_file(temp_conf);
@@ -436,14 +428,7 @@ pub fn is_full_tunnel_config(name: &str) -> bool {
 
 pub fn create_tunnel(draft: &NewTunnelDraft) -> Result<(), Error> {
     let name = draft.name.trim();
-    if name.is_empty() {
-        return Err(Error::WgTui("Interface name is required".into()));
-    }
-    if name.chars().any(|c| c.is_whitespace() || c == '/') {
-        return Err(Error::WgTui(
-            "Interface name cannot contain spaces or '/'".into(),
-        ));
-    }
+    validate_interface_name(name)?;
 
     let private_key = draft.private_key.trim();
     let address = draft.address.trim();
@@ -488,14 +473,7 @@ pub fn create_tunnel(draft: &NewTunnelDraft) -> Result<(), Error> {
 
 pub fn create_server_tunnel(draft: &NewServerDraft) -> Result<(), Error> {
     let name = draft.name.trim();
-    if name.is_empty() {
-        return Err(Error::WgTui("Interface name is required".into()));
-    }
-    if name.chars().any(|c| c.is_whitespace() || c == '/') {
-        return Err(Error::WgTui(
-            "Interface name cannot contain spaces or '/'".into(),
-        ));
-    }
+    validate_interface_name(name)?;
 
     let private_key = draft.private_key.trim();
     let address = draft.address.trim();
