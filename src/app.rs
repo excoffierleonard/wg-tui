@@ -30,11 +30,8 @@ use crate::{
 pub struct App {
     tunnels: Vec<Tunnel>,
     list_state: ListState,
-    show_details: bool,
-    show_help: bool,
-    confirm_delete: bool,
+    flags: AppFlags,
     confirm_full_tunnel: Option<String>,
-    show_add_menu: bool,
     input_path: Option<String>,
     export_path: Option<String>,
     new_tunnel: Option<NewTunnelWizard>,
@@ -44,7 +41,75 @@ pub struct App {
     peer_config: Option<PeerConfigState>,
     peer_save_path: Option<String>,
     message: Option<Message>,
-    pub should_quit: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AppFlags {
+    bits: u8,
+}
+
+impl AppFlags {
+    const SHOW_DETAILS: u8 = 1 << 0;
+    const SHOW_HELP: u8 = 1 << 1;
+    const CONFIRM_DELETE: u8 = 1 << 2;
+    const SHOW_ADD_MENU: u8 = 1 << 3;
+    const SHOULD_QUIT: u8 = 1 << 4;
+
+    fn show_details(self) -> bool {
+        self.is_set(Self::SHOW_DETAILS)
+    }
+
+    fn show_help(self) -> bool {
+        self.is_set(Self::SHOW_HELP)
+    }
+
+    fn confirm_delete(self) -> bool {
+        self.is_set(Self::CONFIRM_DELETE)
+    }
+
+    fn show_add_menu(self) -> bool {
+        self.is_set(Self::SHOW_ADD_MENU)
+    }
+
+    fn should_quit(self) -> bool {
+        self.is_set(Self::SHOULD_QUIT)
+    }
+
+    fn set_show_help(&mut self, value: bool) {
+        self.set(Self::SHOW_HELP, value);
+    }
+
+    fn set_confirm_delete(&mut self, value: bool) {
+        self.set(Self::CONFIRM_DELETE, value);
+    }
+
+    fn set_show_add_menu(&mut self, value: bool) {
+        self.set(Self::SHOW_ADD_MENU, value);
+    }
+
+    fn set_should_quit(&mut self, value: bool) {
+        self.set(Self::SHOULD_QUIT, value);
+    }
+
+    fn toggle_show_details(&mut self) {
+        self.toggle(Self::SHOW_DETAILS);
+    }
+
+    fn set(&mut self, flag: u8, value: bool) {
+        if value {
+            self.bits |= flag;
+        } else {
+            self.bits &= !flag;
+        }
+    }
+
+    fn toggle(&mut self, flag: u8) {
+        self.bits ^= flag;
+    }
+
+    fn is_set(self, flag: u8) -> bool {
+        self.bits & flag != 0
+    }
 }
 
 impl Default for App {
@@ -54,15 +119,13 @@ impl Default for App {
 }
 
 impl App {
+    #[must_use]
     pub fn new() -> Self {
         let mut app = Self {
             tunnels: Vec::new(),
             list_state: ListState::default(),
-            show_details: false,
-            show_help: false,
-            confirm_delete: false,
+            flags: AppFlags::default(),
             confirm_full_tunnel: None,
-            show_add_menu: false,
             input_path: None,
             export_path: None,
             new_tunnel: None,
@@ -72,7 +135,6 @@ impl App {
             peer_config: None,
             peer_save_path: None,
             message: None,
-            should_quit: false,
         };
         app.refresh_tunnels();
         if !app.tunnels.is_empty() {
@@ -92,6 +154,11 @@ impl App {
         self.clamp_selection();
     }
 
+    #[must_use]
+    pub fn should_quit(&self) -> bool {
+        self.flags.should_quit()
+    }
+
     fn clamp_selection(&mut self) {
         let selected = match (self.list_state.selected(), self.tunnels.len()) {
             (_, 0) => None,
@@ -106,10 +173,15 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if let Some(i) = self.list_state.selected() {
-            let new = (i as isize + delta).clamp(0, self.tunnels.len().saturating_sub(1) as isize);
-            self.list_state.select(Some(new as usize));
-        }
+        let Some(i) = self.list_state.selected() else {
+            return;
+        };
+        let max_index = self.tunnels.len().saturating_sub(1);
+        let max_index = isize::try_from(max_index).unwrap_or(0);
+        let current = isize::try_from(i).unwrap_or(0);
+        let new = (current + delta).clamp(0, max_index);
+        let new = usize::try_from(new).unwrap_or(0);
+        self.list_state.select(Some(new));
     }
 
     fn toggle_selected(&mut self) {
@@ -131,8 +203,7 @@ impl App {
             .tunnels
             .iter()
             .find(|t| t.name == name)
-            .map(|t| t.is_active)
-            .unwrap_or(false);
+            .is_some_and(|t| t.is_active);
 
         match wg_quick(if active { "down" } else { "up" }, name) {
             Ok(()) => {
@@ -161,6 +232,11 @@ impl App {
         }
     }
 
+    /// Polls for input events and dispatches them to the app.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if event polling or reading fails.
     pub fn handle_events(&mut self) -> Result<(), Error> {
         if !event::poll(Duration::from_millis(100))? {
             return Ok(());
@@ -173,71 +249,68 @@ impl App {
             return Ok(());
         }
 
-        self.handle_key(key)
-    }
-
-    fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Result<(), Error> {
-        self.message = None;
-
-        if self.consume_help() {
-            return Ok(());
-        }
-        if self.consume_confirm_delete(key) {
-            return Ok(());
-        }
-        if self.consume_confirm_full_tunnel(key) {
-            return Ok(());
-        }
-        if self.consume_peer_save_path(key) {
-            return Ok(());
-        }
-        if self.consume_import_path(key) {
-            return Ok(());
-        }
-        if self.consume_export_path(key) {
-            return Ok(());
-        }
-        if self.consume_peer_endpoint_input(key) {
-            return Ok(());
-        }
-        if self.consume_peer_dns_input(key) {
-            return Ok(());
-        }
-        if self.consume_new_tunnel_wizard(key) {
-            return Ok(());
-        }
-        if self.consume_peer_config(key) {
-            return Ok(());
-        }
-        if self.consume_add_menu(key) {
-            return Ok(());
-        }
-
-        self.handle_global_key(key);
+        self.handle_key(key);
         Ok(())
     }
 
+    fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
+        self.message = None;
+
+        if self.consume_help() {
+            return;
+        }
+        if self.consume_confirm_delete(key) {
+            return;
+        }
+        if self.consume_confirm_full_tunnel(key) {
+            return;
+        }
+        if self.consume_peer_save_path(key) {
+            return;
+        }
+        if self.consume_import_path(key) {
+            return;
+        }
+        if self.consume_export_path(key) {
+            return;
+        }
+        if self.consume_peer_endpoint_input(key) {
+            return;
+        }
+        if self.consume_peer_dns_input(key) {
+            return;
+        }
+        if self.consume_new_tunnel_wizard(key) {
+            return;
+        }
+        if self.consume_peer_config(key) {
+            return;
+        }
+        if self.consume_add_menu(key) {
+            return;
+        }
+
+        self.handle_global_key(key);
+    }
+
     fn consume_help(&mut self) -> bool {
-        if self.show_help {
-            self.show_help = false;
+        if self.flags.show_help() {
+            self.flags.set_show_help(false);
             return true;
         }
         false
     }
 
     fn consume_confirm_delete(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if !self.confirm_delete {
+        if !self.flags.confirm_delete() {
             return false;
         }
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.confirm_delete = false;
-                self.delete_selected();
-            }
-            _ => {
-                self.confirm_delete = false;
-                self.message = Some(Message::Info("Delete cancelled".into()));
-            }
+        if let KeyCode::Char('y' | 'Y') = key.code {
+            self.flags.set_confirm_delete(false);
+            self.delete_selected();
+        } else {
+            self.flags.set_confirm_delete(false);
+            self.message = Some(Message::Info("Delete cancelled".into()));
         }
         true
     }
@@ -246,16 +319,13 @@ impl App {
         let Some(ref name) = self.confirm_full_tunnel else {
             return false;
         };
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                let name = name.clone();
-                self.confirm_full_tunnel = None;
-                self.toggle_selected_with_name(&name);
-            }
-            _ => {
-                self.confirm_full_tunnel = None;
-                self.message = Some(Message::Info("Enable cancelled".into()));
-            }
+        if let KeyCode::Char('y' | 'Y') = key.code {
+            let name = name.clone();
+            self.confirm_full_tunnel = None;
+            self.toggle_selected_with_name(&name);
+        } else {
+            self.confirm_full_tunnel = None;
+            self.message = Some(Message::Info("Enable cancelled".into()));
         }
         true
     }
@@ -505,16 +575,15 @@ impl App {
                 self.peer_save_path = Some(peer.suggested_path.clone());
                 peer.show_qr = false;
             }
-            KeyCode::Char('q') => match QrCode::new(peer.config_text.as_bytes()) {
-                Ok(code) => {
+            KeyCode::Char('q') => {
+                if let Ok(code) = QrCode::new(peer.config_text.as_bytes()) {
                     peer.qr_code = Some(code);
                     peer.show_qr = true;
-                }
-                Err(_) => {
+                } else {
                     peer.show_qr = false;
                     self.message = Some(Message::Error("QR data is too large".into()));
                 }
-            },
+            }
             KeyCode::Char('b') => {
                 peer.show_qr = false;
             }
@@ -527,21 +596,21 @@ impl App {
     }
 
     fn consume_add_menu(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if !self.show_add_menu {
+        if !self.flags.show_add_menu() {
             return false;
         }
         match key.code {
-            KeyCode::Char('i') | KeyCode::Char('1') => {
-                self.show_add_menu = false;
+            KeyCode::Char('i' | '1') => {
+                self.flags.set_show_add_menu(false);
                 self.input_path = Some(String::new());
             }
-            KeyCode::Char('c') | KeyCode::Char('2') => {
-                self.show_add_menu = false;
+            KeyCode::Char('c' | '2') => {
+                self.flags.set_show_add_menu(false);
                 let name = self.default_tunnel_name();
                 self.new_tunnel = Some(NewTunnelWizard::client(name));
             }
-            KeyCode::Char('s') | KeyCode::Char('3') => {
-                self.show_add_menu = false;
+            KeyCode::Char('s' | '3') => {
+                self.flags.set_show_add_menu(false);
                 let name = self.default_tunnel_name();
                 let address = suggest_server_address();
                 let egress = default_egress_interface().unwrap_or_default();
@@ -561,7 +630,7 @@ impl App {
                 ));
             }
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.show_add_menu = false;
+                self.flags.set_show_add_menu(false);
             }
             _ => {}
         }
@@ -570,8 +639,10 @@ impl App {
 
     fn handle_global_key(&mut self, key: crossterm::event::KeyEvent) {
         match (key.code, key.modifiers) {
-            (KeyCode::Char('q') | KeyCode::Esc, _) => self.should_quit = true,
-            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => self.should_quit = true,
+            (KeyCode::Char('q') | KeyCode::Esc, _) => self.flags.set_should_quit(true),
+            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                self.flags.set_should_quit(true);
+            }
             (KeyCode::Char('j') | KeyCode::Down, _) => self.move_selection(1),
             (KeyCode::Char('k') | KeyCode::Up, _) => self.move_selection(-1),
             (KeyCode::Char('g'), _) => self.list_state.select(Some(0)),
@@ -579,13 +650,13 @@ impl App {
                 .list_state
                 .select(Some(self.tunnels.len().saturating_sub(1))),
             (KeyCode::Enter | KeyCode::Char(' '), _) => self.toggle_selected(),
-            (KeyCode::Char('d'), _) => self.show_details = !self.show_details,
+            (KeyCode::Char('d'), _) => self.flags.toggle_show_details(),
             (KeyCode::Char('x'), _) => {
                 if self.selected().is_some() {
-                    self.confirm_delete = true;
+                    self.flags.set_confirm_delete(true);
                 }
             }
-            (KeyCode::Char('a'), _) => self.show_add_menu = true,
+            (KeyCode::Char('a'), _) => self.flags.set_show_add_menu(true),
             (KeyCode::Char('p'), _) => {
                 let Some(tunnel) = self.selected() else {
                     return;
@@ -618,37 +689,44 @@ impl App {
                 self.refresh_tunnels();
                 self.message = Some(Message::Info("Refreshed".into()));
             }
-            (KeyCode::Char('?'), _) => self.show_help = true,
+            (KeyCode::Char('?'), _) => self.flags.set_show_help(true),
             _ => {}
         }
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
-        let chunks = Layout::horizontal(if self.show_details {
+        let chunks = Layout::horizontal(if self.flags.show_details() {
             vec![Constraint::Percentage(40), Constraint::Percentage(60)]
         } else {
             vec![Constraint::Percentage(100)]
         })
         .split(frame.area());
 
+        self.render_main(frame, chunks[0]);
+        if self.flags.show_details() && chunks.len() > 1 {
+            self.render_details(frame, chunks[1]);
+        }
+        self.render_overlays(frame);
+    }
+
+    fn render_main(&mut self, frame: &mut Frame, area: Rect) {
         let main = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(0),
             Constraint::Length(3),
         ])
-        .split(chunks[0]);
+        .split(area);
 
-        self.render_header(frame, main[0]);
+        Self::render_header(frame, main[0]);
         self.render_list(frame, main[1]);
         self.render_status(frame, main[2]);
+    }
 
-        if self.show_details && chunks.len() > 1 {
-            self.render_details(frame, chunks[1]);
-        }
-        if self.show_help {
+    fn render_overlays(&mut self, frame: &mut Frame) {
+        if self.flags.show_help() {
             render_help(frame);
         }
-        if self.confirm_delete
+        if self.flags.confirm_delete()
             && let Some(tunnel) = self.selected()
         {
             render_confirm(frame, &tunnel.name);
@@ -656,9 +734,16 @@ impl App {
         if let Some(ref name) = self.confirm_full_tunnel {
             render_full_tunnel_warning(frame, name);
         }
-        if self.show_add_menu {
+        if self.flags.show_add_menu() {
             render_add_menu(frame);
         }
+        self.render_path_inputs(frame);
+        self.render_wizard_input(frame);
+        self.render_peer_input(frame);
+        self.render_peer_output(frame);
+    }
+
+    fn render_path_inputs(&mut self, frame: &mut Frame) {
         if let Some(ref path) = self.input_path {
             let cwd = std::env::current_dir()
                 .map(|p| format!("cwd: {}  (use ~/ for home)", p.display()))
@@ -689,6 +774,9 @@ impl App {
                 hint.as_deref(),
             );
         }
+    }
+
+    fn render_wizard_input(&mut self, frame: &mut Frame) {
         if let Some(ref wizard) = self.new_tunnel {
             let (title, prompt, hint) = wizard.ui();
             render_input(
@@ -699,6 +787,9 @@ impl App {
                 hint.as_deref(),
             );
         }
+    }
+
+    fn render_peer_input(&mut self, frame: &mut Frame) {
         if let Some(ref endpoint) = self.peer_endpoint_input {
             render_input(
                 frame,
@@ -717,6 +808,9 @@ impl App {
                 Some("Leave empty to skip"),
             );
         }
+    }
+
+    fn render_peer_output(&mut self, frame: &mut Frame) {
         if let Some(ref peer) = self.peer_config {
             if peer.show_qr {
                 if let Some(code) = peer.qr_code.as_ref() {
@@ -739,7 +833,7 @@ impl App {
         }
     }
 
-    fn render_header(&self, f: &mut Frame, area: Rect) {
+    fn render_header(f: &mut Frame, area: Rect) {
         let title = Line::from(vec![
             " WireGuard ".fg(Color::Cyan).bold(),
             "TUI Manager".fg(Color::White),

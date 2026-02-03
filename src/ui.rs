@@ -246,8 +246,9 @@ pub fn render_peer_qr(f: &mut Frame, qr: &QrCode) {
         .build();
 
     let qr_lines: Vec<Line> = qr_string.lines().map(Line::raw).collect();
-    let qr_width = qr_lines.first().map(|l| l.width()).unwrap_or(0) as u16;
-    let qr_height = qr_lines.len() as u16;
+    let qr_width = u16::try_from(qr_lines.first().map_or(0, ratatui::prelude::Line::width))
+        .unwrap_or(u16::MAX);
+    let qr_height = u16::try_from(qr_lines.len()).unwrap_or(u16::MAX);
 
     // Size the box to fit the QR code plus border and footer
     let box_width = (qr_width + 4).min(f.area().width);

@@ -62,6 +62,7 @@ pub enum Message {
 }
 
 impl Message {
+    #[must_use]
     pub fn style(&self) -> Style {
         Style::default().fg(match self {
             Self::Info(_) => Color::Blue,
@@ -70,6 +71,7 @@ impl Message {
         })
     }
 
+    #[must_use]
     pub fn text(&self) -> &str {
         match self {
             Self::Info(s) | Self::Success(s) | Self::Error(s) => s,
