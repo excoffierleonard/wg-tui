@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     let mut app = App::new();
 
-    while !app.should_quit {
+    while !app.should_quit() {
         terminal.draw(|f| app.draw(f))?;
         app.handle_events()?;
     }

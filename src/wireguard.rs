@@ -7,6 +7,7 @@ use std::{
     process::{Command, Output},
 };
 
+use num_traits::ToPrimitive;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
@@ -24,12 +25,14 @@ const CMD_WGET: &str = "wget";
 const ENDPOINT_PLACEHOLDER: &str = "__ENDPOINT__";
 const DNS_BLOCK_PLACEHOLDER: &str = "__DNS_BLOCK__";
 
-const KIB: u64 = 1024;
-const MIB: u64 = KIB * 1024;
-const GIB: u64 = MIB * 1024;
+const KIB_F64: f64 = 1024.0;
+const MIB_F64: f64 = KIB_F64 * 1024.0;
+const GIB_F64: f64 = MIB_F64 * 1024.0;
+const TIB_F64: f64 = GIB_F64 * 1024.0;
 
-/// Checks if required WireGuard dependencies are installed.
+/// Checks if required `WireGuard` dependencies are installed.
 /// Returns a list of missing commands.
+#[must_use]
 pub fn check_dependencies() -> Vec<&'static str> {
     [CMD_WG, CMD_WG_QUICK, CMD_IP]
         .into_iter()
@@ -272,7 +275,7 @@ fn parse_interface_value(content: &str, key: &str) -> Option<String> {
 
 fn parse_ipv4_address(value: &str) -> Option<Ipv4Addr> {
     let value = value.trim();
-    let ip = value.split_once('/').map(|(ip, _)| ip).unwrap_or(value);
+    let ip = value.split_once('/').map_or(value, |(ip, _)| ip);
     ip.parse().ok()
 }
 
@@ -456,16 +459,16 @@ pub fn create_tunnel(draft: &NewTunnelDraft) -> Result<(), Error> {
 
     let mut content = String::new();
     content.push_str("[Interface]\n");
-    content.push_str(&format!("PrivateKey = {private_key}\n"));
-    content.push_str(&format!("Address = {address}\n"));
+    push_kv_line(&mut content, "PrivateKey", private_key);
+    push_kv_line(&mut content, "Address", address);
     if !dns.is_empty() {
-        content.push_str(&format!("DNS = {dns}\n"));
+        push_kv_line(&mut content, "DNS", dns);
     }
     content.push('\n');
     content.push_str("[Peer]\n");
-    content.push_str(&format!("PublicKey = {peer_public_key}\n"));
-    content.push_str(&format!("AllowedIPs = {allowed_ips}\n"));
-    content.push_str(&format!("Endpoint = {endpoint}\n"));
+    push_kv_line(&mut content, "PublicKey", peer_public_key);
+    push_kv_line(&mut content, "AllowedIPs", allowed_ips);
+    push_kv_line(&mut content, "Endpoint", endpoint);
 
     fs::write(path, content)?;
     Ok(())
@@ -508,12 +511,12 @@ pub fn create_server_tunnel(draft: &NewServerDraft) -> Result<(), Error> {
 
     let mut content = String::new();
     content.push_str("[Interface]\n");
-    content.push_str(&format!("Address = {address}\n"));
+    push_kv_line(&mut content, "Address", address);
     content.push_str("SaveConfig = true\n");
-    content.push_str(&format!("PostUp = {post_up}\n"));
-    content.push_str(&format!("PostDown = {post_down}\n"));
-    content.push_str(&format!("ListenPort = {listen_port}\n"));
-    content.push_str(&format!("PrivateKey = {private_key}\n"));
+    push_kv_line(&mut content, "PostUp", post_up);
+    push_kv_line(&mut content, "PostDown", post_down);
+    push_kv_line(&mut content, "ListenPort", listen_port);
+    push_kv_line(&mut content, "PrivateKey", private_key);
 
     fs::write(path, content)?;
     Ok(())
@@ -571,17 +574,26 @@ fn normalize_list(value: &str) -> String {
         .join(", ")
 }
 
+fn push_kv_line(content: &mut String, key: &str, value: impl std::fmt::Display) {
+    use std::fmt::Write as _;
+    let _ = writeln!(content, "{key} = {value}");
+}
+
+fn f64_to_u64(value: f64) -> u64 {
+    value.round().to_u64().unwrap_or(0)
+}
+
 fn parse_bytes(s: &str) -> u64 {
     let s = s.replace(" received", "").replace(" sent", "");
     let mut parts = s.split_whitespace();
     let val: f64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
 
-    match parts.next().map(|u| u.to_uppercase()).as_deref() {
-        Some("B") => val as u64,
-        Some("KIB") => (val * KIB as f64) as u64,
-        Some("MIB") => (val * MIB as f64) as u64,
-        Some("GIB") => (val * GIB as f64) as u64,
-        Some("TIB") => (val * GIB as f64 * 1024.0) as u64,
+    match parts.next().map(str::to_uppercase).as_deref() {
+        Some("B") => f64_to_u64(val),
+        Some("KIB") => f64_to_u64(val * KIB_F64),
+        Some("MIB") => f64_to_u64(val * MIB_F64),
+        Some("GIB") => f64_to_u64(val * GIB_F64),
+        Some("TIB") => f64_to_u64(val * TIB_F64),
         _ => 0,
     }
 }
@@ -709,8 +721,8 @@ pub fn add_server_peer(name: &str) -> Result<PeerConfig, Error> {
     }
     new_content.push('\n');
     new_content.push_str("[Peer]\n");
-    new_content.push_str(&format!("PublicKey = {peer_public_key}\n"));
-    new_content.push_str(&format!("AllowedIPs = {peer_address}\n"));
+    push_kv_line(&mut new_content, "PublicKey", peer_public_key);
+    push_kv_line(&mut new_content, "AllowedIPs", &peer_address);
     if is_interface_active(name) {
         sync_interface_with_content(name, &new_content)?;
     }
