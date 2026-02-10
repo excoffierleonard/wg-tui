@@ -1,14 +1,14 @@
 use std::{
     collections::HashSet,
     fs,
-    io::Write,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     process::{Command, Output},
 };
 
 use num_traits::ToPrimitive;
-use zip::{ZipWriter, write::SimpleFileOptions};
+use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use crate::{
     error::Error,
@@ -381,28 +381,130 @@ pub fn import_tunnel(source_path: &str) -> Result<String, Error> {
     Ok(name)
 }
 
-pub fn import_tunnels(source_path: &str) -> Result<u32, Error> {
+#[derive(Debug, Clone, Copy)]
+pub enum ImportConflictPolicy {
+    AutoRename,
+    SkipConflicts,
+}
+
+pub fn import_zip_conflict_count(source_path: &str) -> Result<u32, Error> {
     let source = expand_path(source_path);
 
     if !source.exists() {
-        return Err(Error::WgTui("Source directory does not exist".into()));
+        return Err(Error::WgTui("Source zip does not exist".into()));
     }
 
-    let contents = fs::read_dir(source);
+    let extension = source.extension().and_then(|e| e.to_str());
+    if extension != Some("zip") {
+        return Err(Error::WgTui("File must have .zip extension".into()));
+    }
 
-    let mut count = 0;
+    let file = fs::File::open(&source)?;
+    let mut archive = ZipArchive::new(file)?;
+    let mut conflicts = 0;
 
-    for entry in contents? {
-        let entry = entry?;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i)?;
+        if entry.is_dir() {
+            continue;
+        }
 
-        if let Some(child_path) = entry.path().to_str() {
-            if import_tunnel(child_path).is_ok() {
-                count += 1;
-            }
+        let Some(name_path) = entry.enclosed_name() else {
+            continue;
+        };
+
+        let extension = name_path.extension().and_then(|e| e.to_str());
+        if extension != Some("conf") {
+            continue;
+        }
+
+        let Some(name) = name_path.file_stem().and_then(|n| n.to_str()) else {
+            continue;
+        };
+
+        let dest = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
+        if dest.exists() {
+            conflicts += 1;
         }
     }
 
+    Ok(conflicts)
+}
+
+pub fn import_tunnels(source_path: &str, policy: ImportConflictPolicy) -> Result<u32, Error> {
+    let source = expand_path(source_path);
+
+    if !source.exists() {
+        return Err(Error::WgTui("Source zip does not exist".into()));
+    }
+
+    let extension = source.extension().and_then(|e| e.to_str());
+    if extension != Some("zip") {
+        return Err(Error::WgTui("File must have .zip extension".into()));
+    }
+
+    let file = fs::File::open(&source)?;
+    let mut archive = ZipArchive::new(file)?;
+    let mut count = 0;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        if entry.is_dir() {
+            continue;
+        }
+
+        let Some(name_path) = entry.enclosed_name() else {
+            continue;
+        };
+
+        let extension = name_path.extension().and_then(|e| e.to_str());
+        if extension != Some("conf") {
+            continue;
+        }
+
+        let Some(name) = name_path.file_stem().and_then(|n| n.to_str()) else {
+            continue;
+        };
+
+        let final_name = match policy {
+            ImportConflictPolicy::AutoRename => next_available_tunnel_name(name),
+            ImportConflictPolicy::SkipConflicts => name.to_string(),
+        };
+
+        let dest = Path::new(CONFIG_DIR).join(format!("{final_name}.conf"));
+        if dest.exists() {
+            continue;
+        }
+
+        let mut contents = Vec::new();
+        entry.read_to_end(&mut contents)?;
+        fs::write(&dest, contents)?;
+        count += 1;
+    }
+
     Ok(count)
+}
+
+fn next_available_tunnel_name(base: &str) -> String {
+    let base = base.trim();
+    if base.is_empty() {
+        return "wg0".into();
+    }
+
+    let dest = Path::new(CONFIG_DIR).join(format!("{base}.conf"));
+    if !dest.exists() {
+        return base.to_string();
+    }
+
+    let mut idx = 1;
+    loop {
+        let candidate = format!("{base}_{idx}");
+        let dest = Path::new(CONFIG_DIR).join(format!("{candidate}.conf"));
+        if !dest.exists() {
+            return candidate;
+        }
+        idx += 1;
+    }
 }
 
 pub fn export_tunnels_to_zip(dest_path: &str) -> Result<PathBuf, Error> {
