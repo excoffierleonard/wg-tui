@@ -44,24 +44,29 @@ fn command_exists(cmd: &str) -> bool {
     which::which(cmd).is_ok()
 }
 
-fn wg_error(output: &Output, default: &str) -> Error {
+fn wg_error(output: &Output, command: &'static str) -> Error {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let msg = stderr.trim();
-    Error::WgTui(if msg.is_empty() {
-        default.into()
-    } else {
-        msg.to_string()
-    })
+    let detail = stderr.trim();
+    Error::CommandFailed {
+        command,
+        detail: if detail.is_empty() {
+            format!("{command} failed")
+        } else {
+            detail.to_string()
+        },
+    }
 }
 
 fn validate_interface_name(name: &str) -> Result<(), Error> {
     if name.is_empty() {
-        return Err(Error::WgTui("Interface name is required".into()));
+        return Err(Error::InvalidInterfaceName {
+            reason: "Interface name is required",
+        });
     }
     if name.chars().any(|c| c.is_whitespace() || c == '/') {
-        return Err(Error::WgTui(
-            "Interface name cannot contain spaces or '/'".into(),
-        ));
+        return Err(Error::InvalidInterfaceName {
+            reason: "Interface name cannot contain spaces or '/'",
+        });
     }
     Ok(())
 }
@@ -117,11 +122,14 @@ pub fn discover_tunnels() -> Vec<Tunnel> {
 pub fn generate_private_key() -> Result<String, Error> {
     let output = Command::new(CMD_WG).arg("genkey").output()?;
     if !output.status.success() {
-        return Err(wg_error(&output, "wg genkey failed"));
+        return Err(wg_error(&output, "wg genkey"));
     }
     let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if key.is_empty() {
-        return Err(Error::WgTui("wg genkey returned an empty key".into()));
+        return Err(Error::CommandFailed {
+            command: "wg genkey",
+            detail: "returned an empty key".into(),
+        });
     }
     Ok(key)
 }
@@ -137,11 +145,14 @@ pub fn derive_public_key(private_key: &str) -> Result<String, Error> {
     }
     let output = child.wait_with_output()?;
     if !output.status.success() {
-        return Err(wg_error(&output, "wg pubkey failed"));
+        return Err(wg_error(&output, "wg pubkey"));
     }
     let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if key.is_empty() {
-        return Err(Error::WgTui("wg pubkey returned an empty key".into()));
+        return Err(Error::CommandFailed {
+            command: "wg pubkey",
+            detail: "returned an empty key".into(),
+        });
     }
     Ok(key)
 }
@@ -216,61 +227,107 @@ fn used_interface_ipv4_addresses() -> HashSet<Ipv4Addr> {
     used
 }
 
-fn parse_interface_addresses(content: &str) -> Vec<String> {
-    let mut addrs = Vec::new();
-    let mut in_interface = false;
+// ---------------------------------------------------------------------------
+// Lightweight WireGuard config parser
+// ---------------------------------------------------------------------------
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            in_interface = line.eq_ignore_ascii_case("[Interface]");
-            continue;
-        }
-        if !in_interface {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim().eq_ignore_ascii_case("Address") {
-            addrs.extend(
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .map(str::to_string),
-            );
-        }
-    }
-
-    addrs
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionKind {
+    Interface,
+    Peer,
 }
 
-fn parse_interface_value(content: &str, key: &str) -> Option<String> {
-    let mut in_interface = false;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
+struct WgSection {
+    kind: SectionKind,
+    entries: Vec<(String, String)>,
+}
+
+struct WgConfig {
+    sections: Vec<WgSection>,
+}
+
+impl WgConfig {
+    fn parse(content: &str) -> Self {
+        let mut sections = Vec::new();
+        let mut current_kind: Option<SectionKind> = None;
+        let mut entries = Vec::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                if let Some(kind) = current_kind.take() {
+                    sections.push(WgSection {
+                        kind,
+                        entries: std::mem::take(&mut entries),
+                    });
+                }
+                current_kind = if line.eq_ignore_ascii_case("[Interface]") {
+                    Some(SectionKind::Interface)
+                } else if line.eq_ignore_ascii_case("[Peer]") {
+                    Some(SectionKind::Peer)
+                } else {
+                    None
+                };
+                continue;
+            }
+            if current_kind.is_none() {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                entries.push((key.trim().to_string(), value.trim().to_string()));
+            }
         }
-        if line.starts_with('[') && line.ends_with(']') {
-            in_interface = line.eq_ignore_ascii_case("[Interface]");
-            continue;
+        if let Some(kind) = current_kind {
+            sections.push(WgSection { kind, entries });
         }
-        if !in_interface {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        if k.trim().eq_ignore_ascii_case(key) {
-            return Some(v.trim().to_string());
-        }
+
+        Self { sections }
     }
-    None
+
+    /// First value of `key` in the [Interface] section.
+    fn interface_value(&self, key: &str) -> Option<&str> {
+        self.sections
+            .iter()
+            .find(|s| s.kind == SectionKind::Interface)
+            .and_then(|s| {
+                s.entries
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                    .map(|(_, v)| v.as_str())
+            })
+    }
+
+    /// All comma-separated values of `key` across all sections of the given kind.
+    fn all_values(&self, kind: SectionKind, key: &str) -> Vec<String> {
+        self.sections
+            .iter()
+            .filter(|s| s.kind == kind)
+            .flat_map(|s| &s.entries)
+            .filter(|(k, _)| k.eq_ignore_ascii_case(key))
+            .flat_map(|(_, v)| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// Whether the [Interface] section contains any of the given keys.
+    fn interface_has_any_key(&self, keys: &[&str]) -> bool {
+        self.sections
+            .iter()
+            .filter(|s| s.kind == SectionKind::Interface)
+            .flat_map(|s| &s.entries)
+            .any(|(k, _)| keys.iter().any(|target| k.eq_ignore_ascii_case(target)))
+    }
+}
+
+fn parse_interface_addresses(content: &str) -> Vec<String> {
+    WgConfig::parse(content).all_values(SectionKind::Interface, "Address")
 }
 
 fn parse_ipv4_address(value: &str) -> Option<Ipv4Addr> {
@@ -301,7 +358,7 @@ pub fn wg_quick(action: &str, name: &str) -> Result<(), Error> {
     let output = Command::new(CMD_WG_QUICK).arg(action).arg(name).output()?;
 
     if !output.status.success() {
-        return Err(wg_error(&output, &format!("wg-quick {action} failed")));
+        return Err(wg_error(&output, "wg-quick"));
     }
 
     Ok(())
@@ -319,7 +376,7 @@ fn sync_interface_with_content(name: &str, content: &str) -> Result<(), Error> {
         .arg(&temp_conf)
         .output()?;
     if !strip_output.status.success() {
-        return Err(wg_error(&strip_output, "wg-quick strip failed"));
+        return Err(wg_error(&strip_output, "wg-quick strip"));
     }
 
     fs::write(&temp_stripped, &strip_output.stdout)?;
@@ -330,7 +387,7 @@ fn sync_interface_with_content(name: &str, content: &str) -> Result<(), Error> {
         .arg(&temp_stripped)
         .output()?;
     if !sync_output.status.success() {
-        return Err(wg_error(&sync_output, "wg syncconf failed"));
+        return Err(wg_error(&sync_output, "wg syncconf"));
     }
 
     let _ = fs::remove_file(temp_conf);
@@ -352,32 +409,30 @@ pub fn expand_path(path: &str) -> PathBuf {
     PathBuf::from(shellexpand::tilde(path).into_owned())
 }
 
-pub fn import_tunnel(source_path: &str) -> Result<String, Error> {
-    let source = expand_path(source_path);
-
+pub fn import_tunnel(source: &Path) -> Result<String, Error> {
     if !source.exists() {
-        return Err(Error::WgTui("Source file does not exist".into()));
+        return Err(Error::Import("Source file does not exist".into()));
     }
 
     let extension = source.extension().and_then(|e| e.to_str());
     if extension != Some("conf") {
-        return Err(Error::WgTui("File must have .conf extension".into()));
+        return Err(Error::Import("File must have .conf extension".into()));
     }
 
     let name = source
         .file_stem()
         .and_then(|n| n.to_str())
-        .ok_or(Error::WgTui(
+        .ok_or(Error::Import(
             "Could not determine tunnel name from file".into(),
         ))?
         .to_string();
 
     let dest = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
     if dest.exists() {
-        return Err(Error::WgTui(format!("Tunnel '{name}' already exists")));
+        return Err(Error::TunnelAlreadyExists { name });
     }
 
-    fs::copy(&source, &dest)?;
+    fs::copy(source, &dest)?;
     Ok(name)
 }
 
@@ -387,43 +442,45 @@ pub enum ImportConflictPolicy {
     SkipConflicts,
 }
 
-pub fn import_zip_conflict_count(source_path: &str) -> Result<u32, Error> {
-    let source = expand_path(source_path);
-
+/// Opens a zip archive, validating existence and extension.
+fn open_conf_archive(source: &Path) -> Result<ZipArchive<fs::File>, Error> {
     if !source.exists() {
-        return Err(Error::WgTui("Source zip does not exist".into()));
+        return Err(Error::Import("Source zip does not exist".into()));
     }
-
     let extension = source.extension().and_then(|e| e.to_str());
     if extension != Some("zip") {
-        return Err(Error::WgTui("File must have .zip extension".into()));
+        return Err(Error::Import("File must have .zip extension".into()));
     }
+    let file = fs::File::open(source)?;
+    Ok(ZipArchive::new(file)?)
+}
 
-    let file = fs::File::open(&source)?;
-    let mut archive = ZipArchive::new(file)?;
+/// Returns the tunnel name for a `.conf` entry at the given index, or `None` if
+/// the entry should be skipped (directory, wrong extension, etc.).
+fn conf_entry_name(archive: &mut ZipArchive<fs::File>, index: usize) -> Option<String> {
+    let entry = archive.by_index(index).ok()?;
+    if entry.is_dir() {
+        return None;
+    }
+    let name_path = entry.enclosed_name()?;
+    let ext = name_path.extension().and_then(|e| e.to_str());
+    if ext != Some("conf") {
+        return None;
+    }
+    name_path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+}
+
+pub fn import_zip_conflict_count(source: &Path) -> Result<u32, Error> {
+    let mut archive = open_conf_archive(source)?;
     let mut conflicts = 0;
 
     for i in 0..archive.len() {
-        let entry = archive.by_index(i)?;
-        if entry.is_dir() {
-            continue;
-        }
-
-        let Some(name_path) = entry.enclosed_name() else {
-            continue;
-        };
-
-        let extension = name_path.extension().and_then(|e| e.to_str());
-        if extension != Some("conf") {
-            continue;
-        }
-
-        let Some(name) = name_path.file_stem().and_then(|n| n.to_str()) else {
-            continue;
-        };
-
-        let dest = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
-        if dest.exists() {
+        if let Some(name) = conf_entry_name(&mut archive, i)
+            && Path::new(CONFIG_DIR).join(format!("{name}.conf")).exists()
+        {
             conflicts += 1;
         }
     }
@@ -431,44 +488,18 @@ pub fn import_zip_conflict_count(source_path: &str) -> Result<u32, Error> {
     Ok(conflicts)
 }
 
-pub fn import_tunnels(source_path: &str, policy: ImportConflictPolicy) -> Result<u32, Error> {
-    let source = expand_path(source_path);
-
-    if !source.exists() {
-        return Err(Error::WgTui("Source zip does not exist".into()));
-    }
-
-    let extension = source.extension().and_then(|e| e.to_str());
-    if extension != Some("zip") {
-        return Err(Error::WgTui("File must have .zip extension".into()));
-    }
-
-    let file = fs::File::open(&source)?;
-    let mut archive = ZipArchive::new(file)?;
+pub fn import_tunnels(source: &Path, policy: ImportConflictPolicy) -> Result<u32, Error> {
+    let mut archive = open_conf_archive(source)?;
     let mut count = 0;
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        if entry.is_dir() {
-            continue;
-        }
-
-        let Some(name_path) = entry.enclosed_name() else {
-            continue;
-        };
-
-        let extension = name_path.extension().and_then(|e| e.to_str());
-        if extension != Some("conf") {
-            continue;
-        }
-
-        let Some(name) = name_path.file_stem().and_then(|n| n.to_str()) else {
+        let Some(name) = conf_entry_name(&mut archive, i) else {
             continue;
         };
 
         let final_name = match policy {
-            ImportConflictPolicy::AutoRename => next_available_tunnel_name(name),
-            ImportConflictPolicy::SkipConflicts => name.to_string(),
+            ImportConflictPolicy::AutoRename => next_available_tunnel_name(&name),
+            ImportConflictPolicy::SkipConflicts => name,
         };
 
         let dest = Path::new(CONFIG_DIR).join(format!("{final_name}.conf"));
@@ -476,6 +507,7 @@ pub fn import_tunnels(source_path: &str, policy: ImportConflictPolicy) -> Result
             continue;
         }
 
+        let mut entry = archive.by_index(i)?;
         let mut contents = Vec::new();
         entry.read_to_end(&mut contents)?;
         fs::write(&dest, contents)?;
@@ -507,15 +539,13 @@ fn next_available_tunnel_name(base: &str) -> String {
     }
 }
 
-pub fn export_tunnels_to_zip(dest_path: &str) -> Result<PathBuf, Error> {
-    let dest = expand_path(dest_path);
-
+pub fn export_tunnels_to_zip(dest: &Path) -> Result<(), Error> {
     let tunnels = discover_tunnels();
     if tunnels.is_empty() {
-        return Err(Error::WgTui("No tunnels to export".into()));
+        return Err(Error::NoTunnelsToExport);
     }
 
-    let file = fs::File::create(&dest)?;
+    let file = fs::File::create(dest)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
@@ -528,7 +558,7 @@ pub fn export_tunnels_to_zip(dest_path: &str) -> Result<PathBuf, Error> {
 
     zip.finish()?;
 
-    Ok(dest)
+    Ok(())
 }
 
 pub fn is_full_tunnel_config(name: &str) -> bool {
@@ -571,14 +601,16 @@ pub fn create_tunnel(draft: &NewTunnelDraft) -> Result<(), Error> {
         || allowed_ips.is_empty()
         || endpoint.is_empty()
     {
-        return Err(Error::WgTui("Missing required fields".into()));
+        return Err(Error::Validation("Missing required fields".into()));
     }
 
     fs::create_dir_all(CONFIG_DIR)?;
 
     let path = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
     if path.exists() {
-        return Err(Error::WgTui(format!("Tunnel '{name}' already exists")));
+        return Err(Error::TunnelAlreadyExists {
+            name: name.to_string(),
+        });
     }
 
     let dns = normalize_list(&draft.dns);
@@ -614,18 +646,20 @@ pub fn create_server_tunnel(draft: &NewServerDraft) -> Result<(), Error> {
         || listen_port.is_empty()
         || egress_interface.is_empty()
     {
-        return Err(Error::WgTui("Missing required fields".into()));
+        return Err(Error::Validation("Missing required fields".into()));
     }
 
     let listen_port: u16 = listen_port
         .parse()
-        .map_err(|_| Error::WgTui("Listen port must be a valid number".into()))?;
+        .map_err(|_| Error::Validation("Listen port must be a valid number".into()))?;
 
     fs::create_dir_all(CONFIG_DIR)?;
 
     let path = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
     if path.exists() {
-        return Err(Error::WgTui(format!("Tunnel '{name}' already exists")));
+        return Err(Error::TunnelAlreadyExists {
+            name: name.to_string(),
+        });
     }
 
     let post_up = format!(
@@ -724,67 +758,6 @@ fn parse_bytes(s: &str) -> u64 {
     }
 }
 
-fn parse_peer_allowed_ips(content: &str) -> Vec<String> {
-    let mut in_peer = false;
-    let mut allowed = Vec::new();
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            in_peer = line.eq_ignore_ascii_case("[Peer]");
-            continue;
-        }
-        if !in_peer {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim().eq_ignore_ascii_case("AllowedIPs") {
-            allowed.extend(
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .map(str::to_string),
-            );
-        }
-    }
-
-    allowed
-}
-
-fn is_server_config(content: &str) -> bool {
-    let mut in_interface = false;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            in_interface = line.eq_ignore_ascii_case("[Interface]");
-            continue;
-        }
-        if !in_interface {
-            continue;
-        }
-        let Some((key, _)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        if key.eq_ignore_ascii_case("PostUp")
-            || key.eq_ignore_ascii_case("PostDown")
-            || key.eq_ignore_ascii_case("SaveConfig")
-        {
-            return true;
-        }
-    }
-    false
-}
-
 fn next_peer_ipv4(base: Ipv4Addr, used: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
     let [a, b, c, d] = base.octets();
     for step in 1u8..=253 {
@@ -803,39 +776,45 @@ fn next_peer_ipv4(base: Ipv4Addr, used: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> 
 pub fn add_server_peer(name: &str) -> Result<PeerConfig, Error> {
     let path = Path::new(CONFIG_DIR).join(format!("{name}.conf"));
     let content = fs::read_to_string(&path)
-        .map_err(|_| Error::WgTui(format!("Could not read config for tunnel '{name}'")))?;
+        .map_err(|_| Error::Config(format!("Could not read config for tunnel '{name}'")))?;
 
-    if !is_server_config(&content) {
-        return Err(Error::WgTui(
+    let config = WgConfig::parse(&content);
+
+    if !config.interface_has_any_key(&["PostUp", "PostDown", "SaveConfig"]) {
+        return Err(Error::Config(
             "Selected tunnel is not a server config".into(),
         ));
     }
 
-    let address = parse_interface_addresses(&content)
+    let address = config
+        .all_values(SectionKind::Interface, "Address")
         .into_iter()
         .find(|addr| parse_ipv4_address(addr).is_some())
-        .ok_or_else(|| Error::WgTui("Server config has no IPv4 address".into()))?;
+        .ok_or_else(|| Error::Config("Server config has no IPv4 address".into()))?;
     let base_ip = parse_ipv4_address(&address)
-        .ok_or_else(|| Error::WgTui("Server IPv4 address is invalid".into()))?;
+        .ok_or_else(|| Error::Config("Server IPv4 address is invalid".into()))?;
 
-    let private_key = parse_interface_value(&content, "PrivateKey")
-        .ok_or_else(|| Error::WgTui("Server config missing PrivateKey".into()))?;
-    let listen_port = parse_interface_value(&content, "ListenPort")
-        .ok_or_else(|| Error::WgTui("Server config missing ListenPort".into()))?;
-    let listen_port: u16 = listen_port
+    let private_key = config
+        .interface_value("PrivateKey")
+        .ok_or_else(|| Error::Config("Server config missing PrivateKey".into()))?
+        .to_string();
+    let listen_port_str = config
+        .interface_value("ListenPort")
+        .ok_or_else(|| Error::Config("Server config missing ListenPort".into()))?;
+    let listen_port: u16 = listen_port_str
         .parse()
-        .map_err(|_| Error::WgTui("Listen port must be a valid number".into()))?;
+        .map_err(|_| Error::Validation("Listen port must be a valid number".into()))?;
 
     let mut used = HashSet::new();
     used.insert(base_ip);
-    for allowed in parse_peer_allowed_ips(&content) {
+    for allowed in config.all_values(SectionKind::Peer, "AllowedIPs") {
         if let Some(ip) = parse_ipv4_address(&allowed) {
             used.insert(ip);
         }
     }
 
     let peer_ip = next_peer_ipv4(base_ip, &used)
-        .ok_or_else(|| Error::WgTui("No available peer address in the server /24".into()))?;
+        .ok_or_else(|| Error::Config("No available peer address in the server /24".into()))?;
     let peer_address = format!("{peer_ip}/32");
 
     let (peer_private_key, peer_public_key) = generate_keypair()?;
