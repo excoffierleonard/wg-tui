@@ -9,7 +9,7 @@ A terminal user interface for managing WireGuard VPN tunnels.
 - View tunnel details (peers, endpoints, transfer statistics)
 - Create new client and server tunnels
 - Add peers to server configs and generate client configs
-- Import tunnels from `.conf` files
+- Import tunnels from `.conf` files or zip archives
 - Export all tunnels to a zip archive
 - Show peer configs and QR codes for easy onboarding
 - Delete tunnels

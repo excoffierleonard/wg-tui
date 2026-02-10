@@ -87,6 +87,39 @@ pub fn render_confirm(f: &mut Frame, name: &str) {
     );
 }
 
+pub fn render_import_conflict(f: &mut Frame, conflicts: u32) {
+    let area = centered_rect(58, 24, f.area());
+    f.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from("Import conflicts detected".fg(Color::Yellow).bold()),
+        Line::raw(""),
+        Line::from(format!("{conflicts} tunnel(s) already exist").fg(Color::White)),
+        Line::raw(""),
+        Line::from(vec![
+            "y".fg(Color::Green).bold(),
+            " to auto-rename, ".into(),
+            "n".fg(Color::Yellow).bold(),
+            " to skip conflicts, ".into(),
+            "any key".fg(Color::Yellow),
+            " to cancel".into(),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title(" Import ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            )
+            .style(Style::default().bg(Color::Black))
+            .alignment(ratatui::layout::Alignment::Center),
+        area,
+    );
+}
+
 pub fn render_full_tunnel_warning(f: &mut Frame, name: &str) {
     let area = centered_rect(60, 30, f.area());
     f.render_widget(Clear, area);
@@ -136,10 +169,10 @@ pub fn render_add_menu(f: &mut Frame) {
             "  Import from file".into(),
         ]),
         Line::from(vec![
-            "a".fg(Color::Yellow).bold(),
+            "z".fg(Color::Yellow).bold(),
             " / ".into(),
             "2".fg(Color::Yellow).bold(),
-            "  Import directory".into(),
+            "  Import zip".into(),
         ]),
         Line::from(vec![
             "c".fg(Color::Yellow).bold(),

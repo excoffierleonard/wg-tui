@@ -16,14 +16,15 @@ use crate::{
     types::{Message, NewServerDraft, NewTunnelDraft, Tunnel},
     ui::{
         bordered_block, label, peer_lines, render_add_menu, render_confirm,
-        render_full_tunnel_warning, render_help, render_input, render_peer_config, render_peer_qr,
-        section, truncate_key,
+        render_full_tunnel_warning, render_help, render_import_conflict, render_input,
+        render_peer_config, render_peer_qr, section, truncate_key,
     },
     wireguard::{
-        add_server_peer, create_server_tunnel, create_tunnel, default_egress_interface,
-        delete_tunnel, detect_public_ip, discover_tunnels, expand_path, export_tunnels_to_zip,
-        generate_private_key, get_interface_info, import_tunnel, import_tunnels, is_full_tunnel_config,
-        is_interface_active, suggest_server_address, wg_quick,
+        ImportConflictPolicy, add_server_peer, create_server_tunnel, create_tunnel,
+        default_egress_interface, delete_tunnel, detect_public_ip, discover_tunnels, expand_path,
+        export_tunnels_to_zip, generate_private_key, get_interface_info, import_tunnel,
+        import_tunnels, import_zip_conflict_count, is_full_tunnel_config, is_interface_active,
+        suggest_server_address, wg_quick,
     },
 };
 
@@ -33,8 +34,9 @@ pub struct App {
     flags: AppFlags,
     confirm_full_tunnel: Option<String>,
     input_path: Option<String>,
-    input_dir: Option<String>,
+    input_zip: Option<String>,
     export_path: Option<String>,
+    pending_import: Option<PendingImport>,
     new_tunnel: Option<NewTunnelWizard>,
     pending_peer: Option<PendingPeerConfig>,
     peer_endpoint_input: Option<String>,
@@ -128,8 +130,9 @@ impl App {
             flags: AppFlags::default(),
             confirm_full_tunnel: None,
             input_path: None,
-            input_dir: None,
+            input_zip: None,
             export_path: None,
+            pending_import: None,
             new_tunnel: None,
             pending_peer: None,
             peer_endpoint_input: None,
@@ -264,6 +267,9 @@ impl App {
         if self.consume_confirm_delete(key) {
             return;
         }
+        if self.consume_import_conflict_choice(key) {
+            return;
+        }
         if self.consume_confirm_full_tunnel(key) {
             return;
         }
@@ -273,7 +279,7 @@ impl App {
         if self.consume_import_path(key) {
             return;
         }
-        if self.consume_import_dir(key) {
+        if self.consume_import_zip(key) {
             return;
         }
         if self.consume_export_path(key) {
@@ -407,24 +413,27 @@ impl App {
         true
     }
 
-    fn consume_import_dir(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        let Some(ref mut path) = self.input_dir else {
+    fn consume_import_zip(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(ref mut path) = self.input_zip else {
             return false;
         };
         match key.code {
             KeyCode::Enter => {
                 let path_str = path.clone();
-                self.input_dir = None;
-                match import_tunnels(&path_str) {
-                    Ok(count) => {
-                        self.message = Some(Message::Success(format!("{count} Tunnel(s) imported")));
-                        self.refresh_tunnels();
+                self.input_zip = None;
+                match import_zip_conflict_count(&path_str) {
+                    Ok(conflicts) if conflicts > 0 => {
+                        self.pending_import = Some(PendingImport {
+                            path: path_str,
+                            conflicts,
+                        });
                     }
+                    Ok(_) => self.finish_import(&path_str, ImportConflictPolicy::SkipConflicts),
                     Err(e) => self.message = Some(Message::Error(e.to_string())),
                 }
             }
             KeyCode::Esc => {
-                self.input_dir = None;
+                self.input_zip = None;
                 self.message = Some(Message::Info("Import cancelled".into()));
             }
             KeyCode::Backspace => {
@@ -435,6 +444,26 @@ impl App {
             }
             _ => {}
         }
+        true
+    }
+
+    fn consume_import_conflict_choice(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(pending) = self.pending_import.take() else {
+            return false;
+        };
+
+        match key.code {
+            KeyCode::Char('y' | 'Y') => {
+                self.finish_import(&pending.path, ImportConflictPolicy::AutoRename);
+            }
+            KeyCode::Char('n' | 'N') => {
+                self.finish_import(&pending.path, ImportConflictPolicy::SkipConflicts);
+            }
+            _ => {
+                self.message = Some(Message::Info("Import cancelled".into()));
+            }
+        }
+
         true
     }
 
@@ -640,9 +669,9 @@ impl App {
                 self.flags.set_show_add_menu(false);
                 self.input_path = Some(String::new());
             }
-            KeyCode::Char('a' | '2') => {
+            KeyCode::Char('z' | '2') => {
                 self.flags.set_show_add_menu(false);
-                self.input_dir = Some(String::new());
+                self.input_zip = Some(String::new());
             }
             KeyCode::Char('c' | '3') => {
                 self.flags.set_show_add_menu(false);
@@ -771,6 +800,9 @@ impl App {
         {
             render_confirm(frame, &tunnel.name);
         }
+        if let Some(ref pending) = self.pending_import {
+            render_import_conflict(frame, pending.conflicts);
+        }
         if let Some(ref name) = self.confirm_full_tunnel {
             render_full_tunnel_warning(frame, name);
         }
@@ -796,14 +828,14 @@ impl App {
                 cwd.as_deref(),
             );
         }
-        if let Some(ref path) = self.input_dir {
+        if let Some(ref path) = self.input_zip {
             let cwd = std::env::current_dir()
                 .map(|p| format!("cwd: {}  (use ~/ for home)", p.display()))
                 .ok();
             render_input(
                 frame,
-                "Import Directory",
-                "Directory path:",
+                "Import Zip",
+                "Zip path (.zip):",
                 path,
                 cwd.as_deref(),
             );
@@ -825,6 +857,16 @@ impl App {
                 path,
                 hint.as_deref(),
             );
+        }
+    }
+
+    fn finish_import(&mut self, path: &str, policy: ImportConflictPolicy) {
+        match import_tunnels(path, policy) {
+            Ok(count) => {
+                self.message = Some(Message::Success(format!("{count} Tunnel(s) imported")));
+                self.refresh_tunnels();
+            }
+            Err(e) => self.message = Some(Message::Error(e.to_string())),
         }
     }
 
@@ -1027,6 +1069,12 @@ impl PendingPeerConfig {
             endpoint,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PendingImport {
+    path: String,
+    conflicts: u32,
 }
 
 #[derive(Debug, Clone)]
