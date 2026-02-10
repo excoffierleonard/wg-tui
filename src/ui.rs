@@ -136,15 +136,21 @@ pub fn render_add_menu(f: &mut Frame) {
             "  Import from file".into(),
         ]),
         Line::from(vec![
-            "c".fg(Color::Yellow).bold(),
+            "a".fg(Color::Yellow).bold(),
             " / ".into(),
             "2".fg(Color::Yellow).bold(),
+            "  Import directory".into(),
+        ]),
+        Line::from(vec![
+            "c".fg(Color::Yellow).bold(),
+            " / ".into(),
+            "3".fg(Color::Yellow).bold(),
             "  Create client".into(),
         ]),
         Line::from(vec![
             "s".fg(Color::Yellow).bold(),
             " / ".into(),
-            "3".fg(Color::Yellow).bold(),
+            "4".fg(Color::Yellow).bold(),
             "  Create server".into(),
         ]),
         Line::raw(""),

@@ -22,7 +22,7 @@ use crate::{
     wireguard::{
         add_server_peer, create_server_tunnel, create_tunnel, default_egress_interface,
         delete_tunnel, detect_public_ip, discover_tunnels, expand_path, export_tunnels_to_zip,
-        generate_private_key, get_interface_info, import_tunnel, is_full_tunnel_config,
+        generate_private_key, get_interface_info, import_tunnel, import_tunnels, is_full_tunnel_config,
         is_interface_active, suggest_server_address, wg_quick,
     },
 };
@@ -33,6 +33,7 @@ pub struct App {
     flags: AppFlags,
     confirm_full_tunnel: Option<String>,
     input_path: Option<String>,
+    input_dir: Option<String>,
     export_path: Option<String>,
     new_tunnel: Option<NewTunnelWizard>,
     pending_peer: Option<PendingPeerConfig>,
@@ -127,6 +128,7 @@ impl App {
             flags: AppFlags::default(),
             confirm_full_tunnel: None,
             input_path: None,
+            input_dir: None,
             export_path: None,
             new_tunnel: None,
             pending_peer: None,
@@ -271,6 +273,9 @@ impl App {
         if self.consume_import_path(key) {
             return;
         }
+        if self.consume_import_dir(key) {
+            return;
+        }
         if self.consume_export_path(key) {
             return;
         }
@@ -389,6 +394,37 @@ impl App {
             }
             KeyCode::Esc => {
                 self.input_path = None;
+                self.message = Some(Message::Info("Import cancelled".into()));
+            }
+            KeyCode::Backspace => {
+                path.pop();
+            }
+            KeyCode::Char(c) => {
+                path.push(c);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn consume_import_dir(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(ref mut path) = self.input_dir else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                let path_str = path.clone();
+                self.input_dir = None;
+                match import_tunnels(&path_str) {
+                    Ok(count) => {
+                        self.message = Some(Message::Success(format!("{count} Tunnel(s) imported")));
+                        self.refresh_tunnels();
+                    }
+                    Err(e) => self.message = Some(Message::Error(e.to_string())),
+                }
+            }
+            KeyCode::Esc => {
+                self.input_dir = None;
                 self.message = Some(Message::Info("Import cancelled".into()));
             }
             KeyCode::Backspace => {
@@ -604,12 +640,16 @@ impl App {
                 self.flags.set_show_add_menu(false);
                 self.input_path = Some(String::new());
             }
-            KeyCode::Char('c' | '2') => {
+            KeyCode::Char('a' | '2') => {
+                self.flags.set_show_add_menu(false);
+                self.input_dir = Some(String::new());
+            }
+            KeyCode::Char('c' | '3') => {
                 self.flags.set_show_add_menu(false);
                 let name = self.default_tunnel_name();
                 self.new_tunnel = Some(NewTunnelWizard::client(name));
             }
-            KeyCode::Char('s' | '3') => {
+            KeyCode::Char('s' | '4') => {
                 self.flags.set_show_add_menu(false);
                 let name = self.default_tunnel_name();
                 let address = suggest_server_address();
@@ -752,6 +792,18 @@ impl App {
                 frame,
                 "Import Tunnel",
                 "File path (.conf):",
+                path,
+                cwd.as_deref(),
+            );
+        }
+        if let Some(ref path) = self.input_dir {
+            let cwd = std::env::current_dir()
+                .map(|p| format!("cwd: {}  (use ~/ for home)", p.display()))
+                .ok();
+            render_input(
+                frame,
+                "Import Directory",
+                "Directory path:",
                 path,
                 cwd.as_deref(),
             );
