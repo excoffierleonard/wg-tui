@@ -381,6 +381,30 @@ pub fn import_tunnel(source_path: &str) -> Result<String, Error> {
     Ok(name)
 }
 
+pub fn import_tunnels(source_path: &str) -> Result<u32, Error> {
+    let source = expand_path(source_path);
+
+    if !source.exists() {
+        return Err(Error::WgTui("Source directory does not exist".into()));
+    }
+
+    let contents = fs::read_dir(source);
+
+    let mut count = 0;
+
+    for entry in contents? {
+        let entry = entry?;
+
+        if let Some(child_path) = entry.path().to_str() {
+            if import_tunnel(child_path).is_ok() {
+                count += 1;
+            }
+        }
+    }
+
+    Ok(count)
+}
+
 pub fn export_tunnels_to_zip(dest_path: &str) -> Result<PathBuf, Error> {
     let dest = expand_path(dest_path);
 
