@@ -1,6 +1,6 @@
 [package]
 name = "wg-tui"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "A terminal user interface for managing WireGuard VPN tunnels"
 repository = "https://github.com/excoffierleonard/wg-tui"
@@ -22,11 +22,7 @@ ratatui = "0.30.0"
 shellexpand = "3.1.1"
 thiserror = "2.0.18"
 which = "8.0.0"
-zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
+zip = { version = "7.4.0", default-features = false, features = ["deflate"] }
 
 [lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
-# Transitive dependencies pull in multiple versions of common crates (syn, bitflags, thiserror, etc.)
-# which we cannot control directly
-multiple_crate_versions = "allow"
+pedantic = "warn"
