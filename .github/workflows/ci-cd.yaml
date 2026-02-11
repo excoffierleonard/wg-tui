@@ -39,6 +39,8 @@ jobs:
         run: cargo test --workspace --all-features --all-targets
 
       - name: Verify Documentation
+        env:
+          RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --no-deps --all-features --document-private-items
 
       - name: Dry run publish for crate

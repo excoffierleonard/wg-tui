@@ -287,7 +287,7 @@ impl WgConfig {
         Self { sections }
     }
 
-    /// First value of `key` in the [Interface] section.
+    /// First value of `key` in the `[Interface]` section.
     fn interface_value(&self, key: &str) -> Option<&str> {
         self.sections
             .iter()
@@ -316,7 +316,7 @@ impl WgConfig {
             .collect()
     }
 
-    /// Whether the [Interface] section contains any of the given keys.
+    /// Whether the `[Interface]` section contains any of the given keys.
     fn interface_has_any_key(&self, keys: &[&str]) -> bool {
         self.sections
             .iter()
